@@ -32,15 +32,23 @@ task_dir = Path(os.environ.get('TW_TASK_DIR', Path.home() / '.task'))
 if not (task_dir / '.git').exists():
     sys.exit(0)
 
-result = subprocess.run(
-    ['git', '-C', str(task_dir), 'status', '--porcelain'],
-    capture_output=True, text=True
-)
-if not result.stdout.strip():
-    sys.exit(0)
+try:
+    # Bail if git is mid-operation (merge, rebase, cherry-pick)
+    for sentinel in ('MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REBASE_HEAD', 'rebase-merge', 'rebase-apply'):
+        if (task_dir / '.git' / sentinel).exists():
+            sys.exit(0)
 
-descs = [t.get('description', '')[:50] for t in tasks[:3]]
-message = 'task: ' + '; '.join(d for d in descs if d)
+    result = subprocess.run(
+        ['git', '-C', str(task_dir), 'status', '--porcelain'],
+        capture_output=True, text=True
+    )
+    if not result.stdout.strip():
+        sys.exit(0)
 
-subprocess.run(['git', '-C', str(task_dir), 'add', '-A'], check=True)
-subprocess.run(['git', '-C', str(task_dir), 'commit', '-m', message], check=True)
+    descs = [t.get('description', '')[:50] for t in tasks[:3]]
+    message = 'task: ' + '; '.join(d for d in descs if d)
+
+    subprocess.run(['git', '-C', str(task_dir), 'add', '-A'], capture_output=True)
+    subprocess.run(['git', '-C', str(task_dir), 'commit', '-m', message], capture_output=True)
+except Exception:
+    pass  # Never let gittw failures surface to Taskwarrior
