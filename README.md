@@ -11,6 +11,9 @@ Git-based sync for Taskwarrior — keep your task database backed up and in sync
 - `gittw init` — set up an existing or new `~/.task/` as a git repo, with a sane `.gitignore`
 - Detects an existing `~/.task/` git repo, shows what it found, asks before touching anything
 - Auto-commit after every Taskwarrior operation via an on-exit hook
+- `tw sync` routes to `gittw sync` via the awesome-taskwarrior wrapper system
+- Sync button in [tw-web](https://github.com/linuxcaffe/WebTaskManager) calls `/api/sync` → `gittw sync`
+- Optional `git-crypt` integration encrypts credential files transparently — safe to push to GitHub
 - Respects `TW_TASK_DIR` — works with B+C dev/prod isolation
 - No TaskServer required. No third-party sync service. Just git and a remote you control.
 - Requires Git, Python 3.6+
@@ -32,6 +35,11 @@ Every Taskwarrior operation is automatically committed. When you sit down at a s
 **One-at-a-time model** — pull before you work, push when you're done. `gittw sync` does both. Concurrent edits from two machines without a sync step in between will produce a rebase conflict — the same way git works everywhere.
 
 **Auto-commit hook** — `on-exit_gittw.py` runs after every `task` command and commits any changes to `~/.task/`. It uses the modified task description as the commit message. You still push manually (or via `gittw sync`).
+
+The hook is designed to be safe by default:
+- Skips silently on read-only operations (export, next, list) — no empty commits
+- Skips if git is mid-operation (merge, rebase, cherry-pick in progress)
+- All git errors are caught silently — a git failure never blocks a `task` command
 
 ## Installation
 
@@ -72,6 +80,18 @@ undo.data
 backlog.data
 *.lock
 
+# Debug and cache logs
+logs/
+**/logs/
+
+# Runtime-written state files (change on every task command)
+config/nag-state.rc
+config/tod.rc
+
+# Editor artifacts — never commit
+*.swp
+*.history
+
 # awesome-taskwarrior installed packages — reinstall from registry on each machine
 awesome-taskwarrior/
 
@@ -82,6 +102,42 @@ awesome-taskwarrior/
 ```
 
 Whether to sync `hooks/` and `scripts/` depends on whether those dirs contain the same content on all your machines. If you manage them with awesome-taskwarrior, exclude them and reinstall per machine.
+
+### Encrypting credential files with git-crypt
+
+Config files like `*.rc` are useful to sync across machines. Some of those files may contain credentials (API keys, bot tokens, etc.). To sync them safely without storing plaintext secrets on GitHub:
+
+```bash
+# Install git-crypt
+sudo apt install git-crypt          # Debian/Ubuntu
+brew install git-crypt              # macOS
+
+# Initialise in your ~/.task repo
+cd ~/.task
+git-crypt init
+
+# Mark credential files for encryption
+cat >> .gitattributes << 'EOF'
+*.creds filter=git-crypt diff=git-crypt
+EOF
+
+# Add and commit — git-crypt encrypts them automatically
+git add .gitattributes config/*.creds
+git commit -m "git-crypt: encrypt credential files"
+
+# Export the key — keep this safe, outside the repo
+git-crypt export-key ~/.git-crypt-task.key
+```
+
+To unlock on another device (one-time setup after cloning):
+
+```bash
+git-crypt unlock /path/to/.git-crypt-task.key
+```
+
+**The key must travel via a secure channel** (local network copy, USB, Signal self-message) — never through the git repo or email.
+
+After unlocking, `gittw sync` works normally: credentials are encrypted at rest in the repo and decrypted transparently on unlocked machines.
 
 ## Usage
 
@@ -114,7 +170,9 @@ First-time setup on a new machine:
 1.  git clone git@github.com:you/tasks-private.git ~/.task   # pull existing task data
 2.  gittw init                                                 # write .gitignore, set things up
     # (or: gittw init git@github.com:you/tasks-private.git    # if ~/.task/ already exists)
-3.  gittw push --set-upstream                                  # first push from this machine
+3.  git-crypt unlock ~/.git-crypt-task.key                     # decrypt credentials (if using git-crypt)
+4.  ln -s ~/dev/gittw/on-exit_gittw.py ~/.task/hooks/on-exit_gittw.py  # install hook
+5.  gittw push --set-upstream                                  # first push from this machine
 ```
 
 Daily use:
@@ -125,13 +183,28 @@ Daily use:
 2.  gittw sync          # push when done (or leaving the machine)
 ```
 
+### tw sync integration
+
+If you use the [awesome-taskwarrior](https://github.com/linuxcaffe/awesome-taskwarrior) `tw` wrapper, `tw sync` routes to `gittw sync` automatically. Register the shim:
+
+```bash
+# Install the shim
+cp ~/dev/gittw/tw-sync.sh ~/.task/scripts/tw-sync
+chmod +x ~/.task/scripts/tw-sync
+
+# Register with the tw wrapper
+echo 'sync|tw-sync|Git-based sync (gittw)|command' >> ~/.task/config/.tw_wrappers
+```
+
+### tw-web Sync button
+
+If you run [tw-web](https://github.com/linuxcaffe/WebTaskManager), the hamburger menu Sync button calls `POST /api/sync` on the Flask backend, which runs `gittw sync`. No additional configuration needed once gittw is in `$PATH`.
+
 ## Project status
 
-⚠️  Early release (v0.1.0). Core `init`, `sync`, `push`, `pull`, `status`, and `log` commands work. The following are not yet implemented:
+Core `init`, `sync`, `push`, `pull`, `status`, and `log` commands work. `tw sync` wrapper and tw-web `/api/sync` endpoint are implemented. The following are not yet implemented:
 
 - `.install` script and awesome-taskwarrior registry entry
-- `tw sync` wrapper integration
-- tw-web `/api/sync` endpoint
 - Conflict resolution guidance for the rebase-conflict case
 - Android / Termux setup documentation
 
