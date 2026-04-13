@@ -19,7 +19,9 @@ def main():
     if not (task_dir / '.git').exists():
         sys.exit(0)
 
-    # Read modified tasks from stdin for a meaningful commit message
+    # Read modified tasks from stdin.
+    # on-exit receives one JSON line per modified task — empty stdin means
+    # read-only operation (export, next, list, etc.): skip.
     tasks = []
     for line in sys.stdin:
         line = line.strip()
@@ -28,6 +30,9 @@ def main():
                 tasks.append(json.loads(line))
             except json.JSONDecodeError:
                 pass
+
+    if not tasks:
+        sys.exit(0)
 
     # Check for changes
     result = subprocess.run(
