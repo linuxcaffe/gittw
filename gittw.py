@@ -55,25 +55,114 @@ def _commit_pending(task_dir, message='auto-commit'):
     return True
 
 
+def _adopt_existing_repo(task_dir, remote):
+    """Adopt an existing ~/.task git repo: add .gitignore, clean index, set remote."""
+    # Show what we found
+    log = subprocess.run(
+        ['git', '-C', str(task_dir), 'log', '--oneline', '-3'],
+        capture_output=True, text=True
+    )
+    existing_remote = subprocess.run(
+        ['git', '-C', str(task_dir), 'remote', '-v'],
+        capture_output=True, text=True
+    )
+    print(f"Found existing git repo in {task_dir}")
+    if log.stdout.strip():
+        print(f"Recent commits:")
+        for line in log.stdout.strip().splitlines():
+            print(f"  {line}")
+    if existing_remote.stdout.strip():
+        print(f"Current remote:")
+        for line in existing_remote.stdout.strip().splitlines():
+            print(f"  {line}")
+    else:
+        print(f"No remote configured.")
+
+    gitignore_path = task_dir / '.gitignore'
+    if gitignore_path.exists():
+        print(f".gitignore already exists — will not overwrite.")
+    else:
+        print(f"\nWill create .gitignore (excludes undo.data, backlog.data, logs/, etc.)")
+
+    if remote:
+        print(f"Will set remote 'origin' to: {remote}")
+
+    print()
+    answer = input("Adopt this repo for gittw? [y/N] ").strip().lower()
+    if answer != 'y':
+        print("Aborted.")
+        sys.exit(0)
+
+    # Write .gitignore
+    if not gitignore_path.exists():
+        gitignore_path.write_text(GITIGNORE)
+        print(f"Created .gitignore")
+
+    # Remove now-ignored files from the index (they stay on disk)
+    ignored = subprocess.run(
+        ['git', '-C', str(task_dir), 'ls-files', '--ignored', '--exclude-standard', '-z'],
+        capture_output=True, text=True
+    )
+    if ignored.stdout.strip():
+        files = [f for f in ignored.stdout.split('\0') if f]
+        subprocess.run(
+            ['git', '-C', str(task_dir), 'rm', '--cached', '--quiet', '-r'] + files,
+            check=True
+        )
+        print(f"Removed {len(files)} now-ignored file(s) from index.")
+
+    # Commit
+    result = subprocess.run(
+        ['git', '-C', str(task_dir), 'status', '--porcelain'],
+        capture_output=True, text=True
+    )
+    if result.stdout.strip():
+        subprocess.run(['git', '-C', str(task_dir), 'add', '-A'], check=True)
+        subprocess.run(
+            ['git', '-C', str(task_dir), 'commit', '-m', 'gittw: adopt repo, add .gitignore'],
+            check=True
+        )
+        print("Committed.")
+
+    # Set remote
+    _set_remote(task_dir, remote)
+
+
+def _set_remote(task_dir, remote):
+    if not remote:
+        print(f"\nAdd a remote when ready:  gittw remote add <url>")
+        return
+    r = subprocess.run(
+        ['git', '-C', str(task_dir), 'remote'],
+        capture_output=True, text=True
+    )
+    if 'origin' in r.stdout.split():
+        subprocess.run(['git', '-C', str(task_dir), 'remote', 'set-url', 'origin', remote], check=True)
+        print(f"Remote 'origin' updated to {remote}")
+    else:
+        subprocess.run(['git', '-C', str(task_dir), 'remote', 'add', 'origin', remote], check=True)
+        print(f"Remote 'origin' set to {remote}")
+    print(f"To push for the first time:  gittw push --set-upstream")
+
+
 def cmd_init(args):
     task_dir = get_task_dir()
     if not task_dir.exists():
         print(f"error: {task_dir} does not exist", file=sys.stderr)
         sys.exit(1)
 
-    git_dir = task_dir / '.git'
-    if git_dir.exists():
-        print(f"Git repo already exists in {task_dir}")
-    else:
-        git(['init'], task_dir=task_dir)
-        print(f"Initialized git repo in {task_dir}")
+    # Existing repo — adopt flow
+    if (task_dir / '.git').exists():
+        _adopt_existing_repo(task_dir, args.remote)
+        return
+
+    # Fresh init
+    git(['init'], task_dir=task_dir)
+    print(f"Initialized git repo in {task_dir}")
 
     gitignore_path = task_dir / '.gitignore'
-    if not gitignore_path.exists():
-        gitignore_path.write_text(GITIGNORE)
-        print(f"Created {gitignore_path}")
-    else:
-        print(f".gitignore already exists — not overwriting")
+    gitignore_path.write_text(GITIGNORE)
+    print(f"Created .gitignore")
 
     git(['add', '-A'], task_dir=task_dir)
     result = git(['status', '--porcelain'], task_dir=task_dir, capture=True)
@@ -83,19 +172,7 @@ def cmd_init(args):
     else:
         print("Nothing to commit.")
 
-    if args.remote:
-        r = git(['remote'], task_dir=task_dir, capture=True, check=False)
-        if 'origin' in r.stdout.split():
-            git(['remote', 'set-url', 'origin', args.remote], task_dir=task_dir)
-            print(f"Remote 'origin' updated to {args.remote}")
-        else:
-            git(['remote', 'add', 'origin', args.remote], task_dir=task_dir)
-            print(f"Remote 'origin' set to {args.remote}")
-        print(f"\nTo push for the first time:")
-        print(f"  gittw push --set-upstream")
-    else:
-        print(f"\nAdd a remote when ready:")
-        print(f"  gittw remote add <url>")
+    _set_remote(task_dir, args.remote)
 
 
 def cmd_status(args):
