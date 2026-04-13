@@ -32,6 +32,10 @@ undo.data
 backlog.data
 *.lock
 
+# Debug and cache logs
+logs/
+config/.cmx_stale
+
 # awesome-taskwarrior installed packages — reinstall from registry on each machine
 awesome-taskwarrior/
 
@@ -98,9 +102,11 @@ def _adopt_existing_repo(task_dir, remote):
         gitignore_path.write_text(GITIGNORE)
         print(f"Created .gitignore")
 
-    # Remove now-ignored files from the index (they stay on disk)
+    # Remove now-ignored files from the index (they stay on disk).
+    # -i --cached finds tracked files matching ignore patterns (untracked ignored
+    # files are irrelevant — git already ignores them without --cached).
     ignored = subprocess.run(
-        ['git', '-C', str(task_dir), 'ls-files', '--ignored', '--exclude-standard', '-z'],
+        ['git', '-C', str(task_dir), 'ls-files', '-i', '--cached', '--exclude-standard', '-z'],
         capture_output=True, text=True
     )
     if ignored.stdout.strip():
