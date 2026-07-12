@@ -60,7 +60,93 @@ chmod +x ~/.task/hooks/on-exit_gittw.py
 gittw --help
 ```
 
-### Option 2 — Via [awesome-taskwarrior](https://github.com/linuxcaffe/awesome-taskwarrior)
+### Option 2 — Android / Termux
+
+gittw runs well in Termux. Taskwarrior 2.6.x must be installed manually — the Termux package manager provides TW3, which is a different codebase.
+
+#### 1. Install Termux prerequisites
+
+Install Termux from [F-Droid](https://f-droid.org/packages/com.termux/) (recommended over the Play Store build), then:
+
+```bash
+pkg update && pkg upgrade -y
+pkg install python git openssh
+```
+
+#### 2. Install Taskwarrior 2.6.x
+
+The Termux `taskwarrior` package is TW3 and will conflict. A pre-built TW 2.6.2 `.deb` for `aarch64` is included in this repo. The cleanest way to transfer it is `scp` directly into the Termux home — no Android storage permissions needed:
+
+```bash
+# On your desktop:
+scp task2_2.6.2-3_aarch64.deb phone:~/
+
+# On the phone in Termux:
+dpkg -i ~/task2_2.6.2-3_aarch64.deb
+task --version   # should report 2.6.2
+```
+
+#### 3. Install gittw
+
+```bash
+git clone https://github.com/linuxcaffe/gittw.git ~/dev/gittw
+mkdir -p ~/.local/bin
+ln -s ~/dev/gittw/gittw.py ~/.local/bin/gittw
+chmod +x ~/dev/gittw/gittw.py
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+gittw --help
+```
+
+#### 4. Add your phone's SSH key to GitHub
+
+Generate a key on the phone, then add it from a desktop machine that already has the `gh` CLI authenticated — no GitHub web interface needed:
+
+```bash
+# On the phone:
+ssh-keygen -t ed25519 -C "termux-phone"
+cat ~/.ssh/id_ed25519.pub
+# Copy the output
+
+# On your desktop:
+gh ssh-key add - --title "termux-phone" <<< "paste-key-here"
+```
+
+#### 5. Clone your existing task data
+
+If you already have a gittw remote, clone it directly — your tasks and config arrive immediately:
+
+```bash
+# If ~/.task was created by a prior `task` invocation, remove it first:
+rmdir ~/.task
+git clone git@github.com:you/tasks-private.git ~/.task
+
+# Wire up ~/.taskrc if you tracked it (symlink it from the cloned copy):
+ln -s ~/.task/.taskrc ~/.taskrc
+
+gittw init      # writes .gitignore, verifies setup
+```
+
+If starting fresh with no existing remote, use `gittw init` to create one and then `gittw push --set-upstream` after adding a remote.
+
+#### 6. Install the auto-commit hook
+
+```bash
+ln -s ~/dev/gittw/on-exit_gittw.py ~/.task/hooks/on-exit_gittw.py
+chmod +x ~/.task/hooks/on-exit_gittw.py
+```
+
+#### 7. Verify
+
+```bash
+task next
+gittw status
+gittw sync
+```
+
+From this point, daily use is identical to any other machine: `gittw sync` before and after a work session.
+
+### Option 3 — Via [awesome-taskwarrior](https://github.com/linuxcaffe/awesome-taskwarrior)
 
 ```bash
 tw -I gittw
@@ -71,6 +157,25 @@ tw -I gittw
 ## Configuration
 
 `gittw` reads `TW_TASK_DIR` if set; otherwise operates on `~/.task/`. No config file needed.
+
+### ~/.taskrc
+
+`~/.taskrc` is your Taskwarrior config — UDAs, report definitions, theme, hooks settings. It lives outside `~/.task/` by default, which means it would be missed by a naive git sync.
+
+`gittw init` detects this and offers to move `~/.taskrc` into `~/.task/.taskrc` and replace it with a symlink. Taskwarrior finds it transparently; gittw tracks it automatically.
+
+To do it manually:
+
+```bash
+mv ~/.taskrc ~/.task/.taskrc
+ln -s ~/.task/.taskrc ~/.taskrc
+```
+
+On a new machine cloned from your remote, the file arrives as `~/.task/.taskrc`. Create the symlink once after cloning:
+
+```bash
+ln -s ~/.task/.taskrc ~/.taskrc
+```
 
 The `.gitignore` written by `gittw init` excludes runtime-only files by default:
 
@@ -167,12 +272,12 @@ All commands work with `TW_TASK_DIR` set — the `td` alias used in B+C isolatio
 First-time setup on a new machine:
 
 ```
-1.  git clone git@github.com:you/tasks-private.git ~/.task   # pull existing task data
-2.  gittw init                                                 # write .gitignore, set things up
-    # (or: gittw init git@github.com:you/tasks-private.git    # if ~/.task/ already exists)
-3.  git-crypt unlock ~/.git-crypt-task.key                     # decrypt credentials (if using git-crypt)
-4.  ln -s ~/dev/gittw/on-exit_gittw.py ~/.task/hooks/on-exit_gittw.py  # install hook
-5.  gittw push --set-upstream                                  # first push from this machine
+1.  git clone git@github.com:you/tasks-private.git ~/.task       # pull existing task data
+2.  ln -s ~/.task/.taskrc ~/.taskrc                               # wire up config (if you tracked it)
+3.  gittw init                                                     # write .gitignore, set things up
+4.  git-crypt unlock ~/.git-crypt-task.key                         # decrypt credentials (if using git-crypt)
+5.  ln -s ~/dev/gittw/on-exit_gittw.py ~/.task/hooks/on-exit_gittw.py  # install hook
+6.  gittw push --set-upstream                                      # first push from this machine
 ```
 
 Daily use:
@@ -206,7 +311,6 @@ Core `init`, `sync`, `push`, `pull`, `status`, and `log` commands work. `tw sync
 
 - `.install` script and awesome-taskwarrior registry entry
 - Conflict resolution guidance for the rebase-conflict case
-- Android / Termux setup documentation
 
 ## Further reading
 
@@ -219,5 +323,5 @@ Core `init`, `sync`, `push`, `pull`, `status`, and `log` commands work. `tw sync
 - License: MIT
 - Language: Python 3
 - Requires: Git, Python 3.6+
-- Platforms: Linux
+- Platforms: Linux, Android (Termux)
 - Version: 0.1.0
