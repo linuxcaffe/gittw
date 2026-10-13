@@ -152,11 +152,22 @@ From this point, daily use is identical to any other machine: `gittw sync` befor
 tw -I gittw
 ```
 
-*(Coming once the .install script and registry entry are added.)*
+Installs `gittw` to `~/.task/scripts/`, the hook to `~/.task/hooks/`, and `config/gittw.rc` (added to
+`included.rc`). The hook is on by default.
 
 ## Configuration
 
-`gittw` reads `TW_TASK_DIR` if set; otherwise operates on `~/.task/`. No config file needed.
+`gittw` reads `TW_TASK_DIR` if set; otherwise operates on `~/.task/`.
+
+### ~/.task/config/gittw.rc
+
+```ini
+gittw.autocommit = yes    # no: the hook stays installed but doesn't commit
+```
+
+The hook reads this file directly (calling `task` from inside a hook would be slow). To take the hook out
+of the chain entirely, use [hook-ctrl](https://github.com/linuxcaffe/tw-hook-ctrl). Each commit costs
+about 30 ms.
 
 ### ~/.taskrc
 
@@ -309,7 +320,6 @@ If you run [tw-web](https://github.com/linuxcaffe/WebTaskManager), the hamburger
 
 Core `init`, `sync`, `push`, `pull`, `status`, and `log` commands work. `tw sync` wrapper and tw-web `/api/sync` endpoint are implemented. The following are not yet implemented:
 
-- `.install` script and awesome-taskwarrior registry entry
 - Conflict resolution guidance for the rebase-conflict case
 
 ## Further reading
@@ -324,4 +334,4 @@ Core `init`, `sync`, `push`, `pull`, `status`, and `log` commands work. `tw sync
 - Language: Python 3
 - Requires: Git, Python 3.6+
 - Platforms: Linux, Android (Termux)
-- Version: 0.1.0
+- Version: 0.2.0
