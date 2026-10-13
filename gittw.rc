@@ -1,0 +1,9 @@
+# gittw.rc — settings for gittw's on-exit hook
+# Installed to ~/.task/config/gittw.rc and included from included.rc.
+#
+# Commit ~/.task after every Taskwarrior change (task add, done, modify, tw-web clicks…).
+# The commit is local; `gittw sync` pushes. About 30 ms per change.
+# no = keep the hook installed but quiet (snapshots then come from `taskutil snapshot`
+# at tw-web launch, or `gittw push`/`sync`). To remove it from the hook chain entirely,
+# use hook-ctrl.
+gittw.autocommit = yes

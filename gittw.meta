@@ -1,0 +1,15 @@
+# gittw.meta
+# Git-based sync and history for ~/.task: commit, pull, push, undo; on-exit auto-commit hook
+
+name=gittw
+version=1.0.0
+type=hook
+description=Git-based sync and history for ~/.task: gittw sync/push/pull/undo/status, plus an on-exit hook that commits after every change (gittw.autocommit in config/gittw.rc; hook-ctrl to remove it)
+repo=https://github.com/linuxcaffe/gittw
+base_url=https://raw.githubusercontent.com/linuxcaffe/gittw/main
+files=gittw.py:script:~/.task/scripts/gittw,on-exit_gittw.py:hook,gittw.rc:config,README.md:doc
+tags=git,sync,backup,history,undo,hook,data-safety
+
+author=linuxcaffe + Claude
+license=MIT
+requires_taskwarrior=2.6.0

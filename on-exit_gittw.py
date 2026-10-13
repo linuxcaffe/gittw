@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """on-exit_gittw.py — auto-commit ~/.task/ after every Taskwarrior write operation.
 
-Install: ln -s ~/dev/gittw/on-exit_gittw.py ~/.task/hooks/on-exit_gittw.py
-         chmod +x ~/.task/hooks/on-exit_gittw.py
+Install: tw -I gittw   (or: ln -s ~/dev/gittw/on-exit_gittw.py ~/.task/hooks/ && chmod +x …)
+Off:     gittw.autocommit = no  in ~/.task/config/gittw.rc, or hook-ctrl (chmod -x).
 """
 
 import sys
@@ -30,6 +30,22 @@ from pathlib import Path
 task_dir = Path(os.environ.get('TW_TASK_DIR', Path.home() / '.task'))
 
 if not (task_dir / '.git').exists():
+    sys.exit(0)
+
+
+def autocommit_enabled():
+    """gittw.autocommit in config/gittw.rc; read directly, since calling `task` from a hook is slow."""
+    try:
+        for line in (task_dir / 'config' / 'gittw.rc').read_text().splitlines():
+            key, sep, value = line.split('#', 1)[0].partition('=')
+            if sep and key.strip() == 'gittw.autocommit':
+                return value.strip().lower() not in ('no', 'off', 'false', '0')
+    except OSError:
+        pass
+    return True
+
+
+if not autocommit_enabled():
     sys.exit(0)
 
 try:
