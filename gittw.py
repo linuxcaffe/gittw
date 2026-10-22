@@ -20,7 +20,7 @@ import argparse
 from datetime import datetime, timezone
 from pathlib import Path
 
-__version__ = '0.3.1'
+__version__ = '0.3.2'
 DATA_FILES = ('pending.data', 'completed.data')
 MERGE_DRIVER = 'twdata'
 
@@ -48,6 +48,8 @@ GITIGNORE = """\
 undo.data
 backlog.data
 *.lock
+# each station's own install record (tw writes this station's paths)
+config/.tw_manifest
 
 # Debug and cache logs
 logs/
@@ -393,12 +395,76 @@ def cmd_log(args):
     git(['log', '--oneline', f'-{args.n}'])
 
 
+# Each station's own record, which a repo may stop tracking: a station keeps its copy when it does.
+# tw writes .tw_manifest with this station's absolute paths, so a shared copy conflicts at every install.
+KEEP_WHEN_UNTRACKED = ('config/.tw_manifest',)
+
+
+def _rebase_stopped(task_dir):
+    for name in ('rebase-merge', 'rebase-apply'):
+        r = git(['rev-parse', '--git-path', name], task_dir=task_dir, capture=True, check=False)
+        path = Path(r.stdout.strip())
+        if not path.is_absolute():
+            path = task_dir / path
+        if r.returncode == 0 and path.exists():
+            return True
+    return False
+
+
+def _refuse_if_rebase_stopped(task_dir):
+    if _rebase_stopped(task_dir):
+        print(f"gittw: {task_dir} is stopped in the middle of a rebase (an earlier pull conflicted).\n"
+              f"  Finish it: fix the files `git -C {task_dir} status` names, git add them, git rebase --continue\n"
+              f"  Or undo it: git -C {task_dir} rebase --abort   (your local commits stay)", file=sys.stderr)
+        sys.exit(1)
+
+
+def _pull_rebase(task_dir, quiet=True):
+    """pull --rebase. A conflict over a KEEP_WHEN_UNTRACKED file the other stations stopped tracking
+    is settled their way (untracked), and this station's copy put back. Any other conflict the merge
+    driver can't settle is undone, so the repo is back on its branch with its own commits, and the
+    files are named: never left stopped mid-rebase."""
+    keep = {rel: (task_dir / rel).read_bytes() for rel in KEEP_WHEN_UNTRACKED if (task_dir / rel).is_file()}
+    r = git(['pull', '--rebase'] + (['-q'] if quiet else []), task_dir=task_dir, check=False, capture=True)
+    conflicted = []
+    while r.returncode != 0 and _rebase_stopped(task_dir):
+        conflicted = git(['diff', '--name-only', '--diff-filter=U'], task_dir=task_dir,
+                         capture=True, check=False).stdout.split()
+        # mid-rebase, HEAD is the upstream side: a file it lacks is one the others stopped tracking
+        upstream_has = lambda rel: git(['cat-file', '-e', f'HEAD:{rel}'], task_dir=task_dir,
+                                       check=False, capture=True).returncode == 0
+        if not conflicted or any(rel not in keep or upstream_has(rel) for rel in conflicted):
+            break
+        git(['rm', '-q', '--cached', '--'] + conflicted, task_dir=task_dir, check=False, capture=True)
+        staged = git(['diff', '--cached', '--quiet'], task_dir=task_dir, check=False).returncode != 0
+        r = subprocess.run(['git', '-C', str(task_dir), 'rebase', '--continue' if staged else '--skip'],
+                           capture_output=True, text=True, env={**os.environ, 'GIT_EDITOR': 'true'})
+        print(f"The other stations stopped tracking {', '.join(conflicted)}; so does this one, keeping its copy.")
+    for rel, data in keep.items():
+        tracked = git(['ls-files', '--error-unmatch', rel], task_dir=task_dir, check=False, capture=True).returncode == 0
+        if not tracked and not (task_dir / rel).exists():
+            (task_dir / rel).parent.mkdir(parents=True, exist_ok=True)   # git removes a folder it emptied
+            (task_dir / rel).write_bytes(data)
+    if r.returncode == 0:
+        return
+    if _rebase_stopped(task_dir):
+        git(['rebase', '--abort'], task_dir=task_dir, check=False, capture=True)
+        print(f"gittw: the pull conflicted in {', '.join(conflicted) or 'a file'}, which gittw can't merge; "
+              f"undone, nothing here changed (your local commits stay).\n"
+              f"  To settle it by hand: git -C {task_dir} pull --rebase, fix those files, git add them, "
+              f"git rebase --continue", file=sys.stderr)
+        sys.exit(1)
+    print((r.stderr or r.stdout).strip(), file=sys.stderr)
+    sys.exit(r.returncode)
+
+
 def cmd_pull(args):
     task_dir = get_task_dir()
+    _refuse_if_rebase_stopped(task_dir)
     committed = _commit_pending(task_dir)
     if committed:
         print("Committed local changes before pull.")
-    git(['pull', '--rebase'], task_dir=task_dir)
+    _pull_rebase(task_dir, quiet=False)
 
 
 def cmd_push(args):
@@ -415,6 +481,7 @@ def cmd_sync(args):
     """Commit local changes, pull (rebase, merging task data by UUID), tidy up, record this
     station's sync, then push."""
     task_dir = get_task_dir()
+    _refuse_if_rebase_stopped(task_dir)
     ensure_merge_driver(task_dir, quiet=True)
 
     msg = args.message or 'gittw: sync commit'
@@ -425,7 +492,7 @@ def cmd_sync(args):
         print("Working tree clean.")
 
     print("Pulling...")
-    git(['pull', '--rebase', '-q'], task_dir=task_dir)
+    _pull_rebase(task_dir)
 
     for note in after_pull(task_dir):
         print(note)

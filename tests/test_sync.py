@@ -233,3 +233,60 @@ def test_sync_without_a_git_identity_says_how_to_set_one(stations, tmp_path):
     assert r.returncode != 0
     assert 'no name and email' in r.stderr and 'config user.email' in r.stderr
     assert 'Traceback' not in r.stderr
+
+
+# ── a pull that conflicts outside the task data (0.3.2) ───────────────────────
+
+def in_rebase(st):
+    return any((st.path / '.git' / d).exists() for d in ('rebase-merge', 'rebase-apply'))
+
+
+def test_a_conflict_outside_the_task_data_is_undone_and_named(stations):
+    a, b = stations
+    (a.path / 'notes.txt').write_text('base\n')
+    a.git('add', 'notes.txt')
+    a.git('commit', '-qm', 'notes')
+    a.gittw('sync')
+    b.gittw('sync')
+    (a.path / 'notes.txt').write_text('from a\n')
+    a.gittw('sync')
+    (b.path / 'notes.txt').write_text('from b\n')
+    b.task('add', '--', 'b work')
+    r = b.gittw('sync', ok=False)
+    assert r.returncode != 0
+    assert 'notes.txt' in r.stderr and 'undone' in r.stderr, r.stderr
+    assert not in_rebase(b), 'left stopped mid-rebase'
+    assert b.git('symbolic-ref', '--short', 'HEAD').strip() == 'master'
+    assert (b.path / 'notes.txt').read_text() == 'from b\n', "b's own change is still there"
+    assert 'b work' in b.descriptions(), "b's task is still there"
+
+
+def test_sync_refuses_while_a_rebase_is_stopped(stations):
+    a, b = stations
+    (b.path / '.git' / 'rebase-merge').mkdir()
+    r = b.gittw('sync', ok=False)
+    assert r.returncode != 0 and 'middle of a rebase' in r.stderr and 'rebase --abort' in r.stderr
+    assert (b.path / '.git' / 'rebase-merge').exists(), 'a stopped rebase is yours to finish or undo'
+
+
+@pytest.mark.parametrize('b_changed_it', [True, False])
+def test_a_station_keeps_its_manifest_when_the_repo_stops_tracking_it(stations, b_changed_it):
+    a, b = stations
+    (a.path / 'config').mkdir()
+    (a.path / 'config' / '.tw_manifest').write_text('app|1.0|/home/a/x||t\n')
+    a.git('add', 'config/.tw_manifest')
+    a.git('commit', '-qm', 'manifest')
+    a.gittw('sync')
+    b.gittw('sync')
+    mine = 'app|1.0|/data/b/x||t\n' if b_changed_it else 'app|1.0|/home/a/x||t\n'
+    (b.path / 'config' / '.tw_manifest').write_text(mine)   # b's own record (or the shared one, unchanged)
+    a.git('rm', '-q', '--cached', 'config/.tw_manifest')
+    (a.path / '.gitignore').write_text((a.path / '.gitignore').read_text() + 'config/.tw_manifest\n')
+    a.git('add', '.gitignore')
+    a.git('commit', '-qm', 'untrack the manifest')
+    a.gittw('sync')
+    r = b.gittw('sync')
+    if b_changed_it:
+        assert 'stopped tracking config/.tw_manifest' in r.stdout, 'not the modify/delete path: ' + r.stdout
+    assert (b.path / 'config' / '.tw_manifest').read_text() == mine
+    assert 'config/.tw_manifest' not in b.git('ls-files')

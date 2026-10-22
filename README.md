@@ -57,6 +57,15 @@ Each decision goes to `.git/gittw-merge.log`. After the pull, `sync` drops a tas
 `pending.data` and `completed.data` (keeping the newer copy) and **reports** a recurring template that
 ended up with two pending instances (two stations each made one): which to keep is yours to decide.
 
+**A conflict gittw can't merge** (a file other than the task data, both sides changed it): the pull
+is undone, the repo is back on its branch with its own commits, and the error names the files
+(0.3.2; before, the repo was left stopped mid-rebase and every later sync failed). A sync refuses to
+start while a rebase is stopped, and says how to finish or undo it.
+
+**Each station's own records** — `config/.tw_manifest` (what `tw` installed here, with this station's
+paths) isn't shared: new repos ignore it, and when a repo stops tracking it, every station keeps its
+own copy through the pull that drops it (`KEEP_WHEN_UNTRACKED`).
+
 **gc at sync** — with `gc=off` in `.taskrc`, Taskwarrior never renumbers IDs or moves finished tasks
 on its own; `gittw sync` runs gc once, right after pulling, when this station is current, and commits
 the move. `gittw.gc_at_sync = no` turns that off.
@@ -370,4 +379,4 @@ Core `init`, `sync`, `push`, `pull`, `status`, and `log` commands work. `tw sync
 - Language: Python 3
 - Requires: Git, Python 3.6+
 - Platforms: Linux, Android (Termux)
-- Version: 0.3.1
+- Version: 0.3.2
