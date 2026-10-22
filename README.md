@@ -8,6 +8,13 @@ Git-based sync for Taskwarrior — keep your task database backed up and in sync
 ## TL;DR
 
 - `gittw sync` — commit local changes, pull (rebase), push in one command
+- **Several stations** (a laptop, a phone) can both change tasks between syncs: a merge driver merges
+  `pending.data` and `completed.data` **by task UUID**, so two new tasks, or edits to different tasks,
+  never conflict; a task changed on both sides keeps the later change (0.3.0)
+- Every commit names its station (`Station: s5`), `gittw status` shows what's incoming from which
+  station and when each one last synced; `--json` for clients (0.3.0)
+- `gittw sync` runs Taskwarrior's gc once, right after pulling, so a station with `gc=off` keeps stable
+  IDs and never moves tasks between files on a mere read (0.3.0)
 - `gittw init` — set up an existing or new `~/.task/` as a git repo, with a sane `.gitignore`
 - Detects an existing `~/.task/` git repo, shows what it found, asks before touching anything
 - Auto-commit after every Taskwarrior operation via an on-exit hook
@@ -32,7 +39,30 @@ Every Taskwarrior operation is automatically committed. When you sit down at a s
 
 ## Core concepts
 
-**One-at-a-time model** — pull before you work, push when you're done. `gittw sync` does both. Concurrent edits from two machines without a sync step in between will produce a rebase conflict — the same way git works everywhere.
+**Stations** — each machine with a clone of `~/.task` is a station, named by `gittw.device` in its
+untracked `~/.task/local.rc` (else its hostname). Sync often; when two stations did change tasks between
+syncs, the merge driver sorts it out (below), and `gittw status` says what's waiting.
+
+**Merging task data by UUID** — Taskwarrior keeps one task per line, and git merges by line, so two
+stations that each added a task (both append to `pending.data`) would conflict. `gittw merge-data` is a
+git merge driver for `pending.data` and `completed.data` (named in the tracked `.gitattributes`,
+configured per clone by `gittw setup`, or by the first `gittw sync`). It merges three ways, task by task:
+
+- a task only one side changed takes that change; new tasks from both sides are kept;
+- a task both sides changed keeps the copy with the later `modified` (last write wins, as taskd did);
+- removed on one side and changed on the other: the change is kept, so nothing is lost silently;
+- this side's order first, then the other side's new tasks, so IDs here stay put.
+
+Each decision goes to `.git/gittw-merge.log`. After the pull, `sync` drops a task found in both
+`pending.data` and `completed.data` (keeping the newer copy) and **reports** a recurring template that
+ended up with two pending instances (two stations each made one): which to keep is yours to decide.
+
+**gc at sync** — with `gc=off` in `.taskrc`, Taskwarrior never renumbers IDs or moves finished tasks
+on its own; `gittw sync` runs gc once, right after pulling, when this station is current, and commits
+the move. `gittw.gc_at_sync = no` turns that off.
+
+**Last seen** — every sync writes `.stations/<name>` (tracked) with the time, so the other stations know
+when this one last synced: "s5 synced 3 h ago" is the hint that it may have changes not pushed yet.
 
 **Auto-commit hook** — `on-exit_gittw.py` runs after every `task` command and commits any changes to `~/.task/`. It uses the modified task description as the commit message. You still push manually (or via `gittw sync`).
 
@@ -162,8 +192,12 @@ Installs `gittw` to `~/.task/scripts/`, the hook to `~/.task/hooks/`, and `confi
 ### ~/.task/config/gittw.rc
 
 ```ini
-gittw.autocommit = yes    # no: the hook stays installed but doesn't commit
+gittw.autocommit  = yes   # no: the hook stays installed but doesn't commit
+gittw.gc_at_sync  = yes   # no: sync doesn't run Taskwarrior's gc after pulling
 ```
+
+`gittw.device` (this station's name) goes in `~/.task/local.rc`, which is per station and untracked;
+a `gittw.*` setting there also wins over `gittw.rc`.
 
 The hook reads this file directly (calling `task` from inside a hook would be slow). To take the hook out
 of the chain entirely, use [hook-ctrl](https://github.com/linuxcaffe/tw-hook-ctrl). Each commit costs
@@ -261,7 +295,9 @@ After unlocking, `gittw sync` works normally: credentials are encrypted at rest 
 gittw init                          # set up ~/.task/ as a git repo (fresh or existing)
 gittw init git@github.com:u/r.git  # same, and set the remote in one step
 
-gittw status                        # working tree status + ahead/behind remote
+gittw status                        # working tree, ahead/behind, incoming by station, stations last seen
+gittw status --fetch --json         # the same, fetched first, as JSON
+gittw setup                         # configure this clone's merge driver (sync does it too)
 gittw log                           # last 10 commits
 gittw log -n 20                     # last 20 commits
 
@@ -320,7 +356,7 @@ If you run [tw-web](https://github.com/linuxcaffe/WebTaskManager), the hamburger
 
 Core `init`, `sync`, `push`, `pull`, `status`, and `log` commands work. `tw sync` wrapper and tw-web `/api/sync` endpoint are implemented. The following are not yet implemented:
 
-- Conflict resolution guidance for the rebase-conflict case
+- Conflict resolution guidance for a rebase conflict in a file other than the task data
 
 ## Further reading
 
@@ -334,4 +370,4 @@ Core `init`, `sync`, `push`, `pull`, `status`, and `log` commands work. `tw sync
 - Language: Python 3
 - Requires: Git, Python 3.6+
 - Platforms: Linux, Android (Termux)
-- Version: 0.2.0
+- Version: 0.3.0

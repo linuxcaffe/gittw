@@ -7,3 +7,8 @@
 # at tw-web launch, or `gittw push`/`sync`). To remove it from the hook chain entirely,
 # use hook-ctrl.
 gittw.autocommit = yes
+
+# Run Taskwarrior's gc once in every `gittw sync`, right after pulling (a no-op when gc is on).
+# With gc=off in .taskrc, IDs stay put and reads never move tasks between files; finished
+# tasks move to completed.data at sync instead. no = leave gc entirely to Taskwarrior.
+gittw.gc_at_sync = yes

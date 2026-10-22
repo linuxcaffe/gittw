@@ -45,6 +45,19 @@ def autocommit_enabled():
     return True
 
 
+def station():
+    """gittw.device in local.rc (this station's name), else the hostname."""
+    try:
+        for line in (task_dir / 'local.rc').read_text().splitlines():
+            key, sep, value = line.split('#', 1)[0].partition('=')
+            if sep and key.strip() == 'gittw.device' and value.strip():
+                return value.strip()
+    except OSError:
+        pass
+    import socket
+    return socket.gethostname().split('.')[0] or 'unknown'
+
+
 if not autocommit_enabled():
     sys.exit(0)
 
@@ -63,6 +76,7 @@ try:
 
     descs = [t.get('description', '')[:50] for t in tasks[:3]]
     message = 'task: ' + '; '.join(d for d in descs if d)
+    message += f'\n\nStation: {station()}'
 
     subprocess.run(['git', '-C', str(task_dir), 'add', '-A'], capture_output=True)
     subprocess.run(['git', '-C', str(task_dir), 'commit', '-m', message], capture_output=True)

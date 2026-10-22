@@ -1,12 +1,28 @@
 #!/usr/bin/env python3
-"""gittw — git-based sync for Taskwarrior ~/.task/"""
+"""gittw — git-based sync for Taskwarrior ~/.task/
+
+Several stations (a laptop, a phone) share one ~/.task through a git remote. Every commit
+gittw makes says which station made it (a `Station:` trailer); `gittw sync` records when
+this station last synced (.stations/<name>), runs Taskwarrior's gc once right after
+pulling (so a station with gc=off never moves tasks between files on a mere read), and
+pulls with a merge driver for pending.data and completed.data that merges by task UUID,
+so two stations that both changed tasks between syncs rarely conflict.
+"""
 
 import os
+import re
+import shlex
+import shutil
+import socket
 import sys
 import subprocess
 import argparse
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
+
+__version__ = '0.3.0'
+DATA_FILES = ('pending.data', 'completed.data')
+MERGE_DRIVER = 'twdata'
 
 
 def get_task_dir():
@@ -90,6 +106,45 @@ def _handle_taskrc(task_dir):
     print(f"Staged .taskrc for commit.")
 
 
+# ── this station ──────────────────────────────────────────────────────────────
+
+def _rc_value(path, key):
+    """key's value in one rc file (no includes), or None. Read directly: calling task is slow."""
+    try:
+        for line in Path(path).read_text().splitlines():
+            k, sep, v = line.split('#', 1)[0].partition('=')
+            if sep and k.strip() == key:
+                return v.strip()
+    except OSError:
+        pass
+    return None
+
+
+def setting(key, default, task_dir=None):
+    """gittw.<key> from config/gittw.rc, then local.rc (this station's word wins)."""
+    td = task_dir or get_task_dir()
+    value = default
+    for path in (td / 'config' / 'gittw.rc', td / 'local.rc'):
+        v = _rc_value(path, f'gittw.{key}')
+        if v is not None:
+            value = v
+    return value
+
+
+def _yes(value):
+    return str(value).strip().lower() not in ('no', 'off', 'false', '0', '')
+
+
+def station(task_dir=None):
+    """This station's name: gittw.device in local.rc, else the hostname."""
+    td = task_dir or get_task_dir()
+    return _rc_value(td / 'local.rc', 'gittw.device') or socket.gethostname().split('.')[0] or 'unknown'
+
+
+def with_station(message, task_dir=None):
+    return f'{message}\n\nStation: {station(task_dir)}'
+
+
 def _commit_pending(task_dir, message=None):
     """Stage and commit any pending changes. Returns True if a commit was made."""
     result = subprocess.run(
@@ -103,7 +158,7 @@ def _commit_pending(task_dir, message=None):
         now = datetime.now().strftime('%Y-%m-%d %H:%M')
         message = f'gittw: {now} ({n} file{"s" if n != 1 else ""} changed)'
     subprocess.run(['git', '-C', str(task_dir), 'add', '-A'], check=True)
-    subprocess.run(['git', '-C', str(task_dir), 'commit', '-m', message], check=True)
+    subprocess.run(['git', '-C', str(task_dir), 'commit', '-q', '-m', with_station(message, task_dir)], check=True)
     return True
 
 
@@ -224,10 +279,11 @@ def cmd_init(args):
     # Handle ~/.taskrc before initial commit so it's included
     _handle_taskrc(task_dir)
 
+    ensure_merge_driver(task_dir)
     git(['add', '-A'], task_dir=task_dir)
     result = git(['status', '--porcelain'], task_dir=task_dir, capture=True)
     if result.stdout.strip():
-        git(['commit', '-m', 'gittw: initial commit'], task_dir=task_dir)
+        git(['commit', '-m', with_station('gittw: initial commit', task_dir)], task_dir=task_dir)
         print("Initial commit created.")
     else:
         print("Nothing to commit.")
@@ -235,8 +291,64 @@ def cmd_init(args):
     _set_remote(task_dir, args.remote)
 
 
+def _ago(iso):
+    try:
+        then = datetime.fromisoformat(iso.replace('Z', '+00:00'))
+    except ValueError:
+        return iso
+    secs = (datetime.now(timezone.utc) - then).total_seconds()
+    for unit, n in (('d', 86400), ('h', 3600), ('min', 60)):
+        if secs >= n:
+            return f'{int(secs // n)} {unit} ago'
+    return 'just now'
+
+
+def last_seen(task_dir=None):
+    """{station: last_sync ISO time} from .stations/*."""
+    td = task_dir or get_task_dir()
+    out = {}
+    for f in sorted((td / '.stations').glob('*')):
+        when = _rc_value(f, 'last_sync')
+        if when:
+            out[f.name] = when
+    return out
+
+
+def incoming(task_dir=None):
+    """{station: commits on the remote not here yet}, by each commit's Station: trailer."""
+    td = task_dir or get_task_dir()
+    r = git(['log', '--format=%(trailers:key=Station,valueonly,separator=%x2C)', 'HEAD..@{u}'],
+            task_dir=td, capture=True, check=False)
+    out = {}
+    if r.returncode == 0:
+        for line in r.stdout.splitlines():
+            name = line.strip().split(',')[0].strip() or '(untagged)'
+            out[name] = out.get(name, 0) + 1
+    return out
+
+
+def status_data(task_dir=None, fetch=False):
+    td = task_dir or get_task_dir()
+    if fetch:
+        git(['fetch', '-q'], task_dir=td, check=False)
+    dirty = git(['status', '--porcelain'], task_dir=td, capture=True, check=False).stdout.splitlines()
+    ab = git(['rev-list', '--left-right', '--count', 'HEAD...@{u}'], task_dir=td, capture=True, check=False)
+    ahead = behind = 0
+    if ab.returncode == 0 and ab.stdout.split():
+        ahead, behind = map(int, ab.stdout.split())
+    return {'station': station(td), 'uncommitted': len(dirty), 'unpushed': ahead, 'behind': behind,
+            'incoming': incoming(td), 'last_seen': last_seen(td),
+            'merge_driver': merge_driver_configured(td)}
+
+
 def cmd_status(args):
     task_dir = get_task_dir()
+    if getattr(args, 'json', False):
+        import json
+        print(json.dumps(status_data(task_dir, fetch=args.fetch), indent=2))
+        return
+    if getattr(args, 'fetch', False):
+        git(['fetch', '-q'], task_dir=task_dir, check=False)
     result = git(['status', '--short'], task_dir=task_dir, capture=True)
     if result.stdout.strip():
         print(result.stdout, end='')
@@ -259,6 +371,14 @@ def cmd_status(args):
             ahead, behind = ab.stdout.strip().split()
             remote = tracking.stdout.strip()
             print(f"{remote}: {ahead} ahead, {behind} behind")
+            inc = incoming(task_dir)
+            if inc:
+                print("Incoming: " + ', '.join(f"{n} from {s}" for s, n in sorted(inc.items())))
+    me = station(task_dir)
+    seen = last_seen(task_dir)
+    if seen:
+        print("Stations: " + '; '.join(f"{s}{' (this one)' if s == me else ''} synced {_ago(t)}"
+                                       for s, t in sorted(seen.items())))
 
 
 def cmd_log(args):
@@ -284,8 +404,10 @@ def cmd_push(args):
 
 
 def cmd_sync(args):
-    """Commit local changes, pull (rebase), then push."""
+    """Commit local changes, pull (rebase, merging task data by UUID), tidy up, record this
+    station's sync, then push."""
     task_dir = get_task_dir()
+    ensure_merge_driver(task_dir, quiet=True)
 
     msg = args.message or 'gittw: sync commit'
     committed = _commit_pending(task_dir, msg)
@@ -295,12 +417,204 @@ def cmd_sync(args):
         print("Working tree clean.")
 
     print("Pulling...")
-    git(['pull', '--rebase'], task_dir=task_dir)
+    git(['pull', '--rebase', '-q'], task_dir=task_dir)
+
+    for note in after_pull(task_dir):
+        print(note)
+    write_last_seen(task_dir)
+    _commit_pending(task_dir, f'gittw: {station(task_dir)} synced')
 
     print("Pushing...")
-    git(['push'], task_dir=task_dir)
+    git(['push', '-q'], task_dir=task_dir)
 
     print("Sync complete.")
+
+
+# ── after a pull: duplicates across files, recurrence, gc ─────────────────────
+
+UUID_RE = re.compile(r'(?:^\[| )uuid:"([0-9a-fA-F-]+)"')
+
+
+def _field(line, key):
+    m = re.search(r'(?:^\[| )%s:"([^"]*)"' % re.escape(key), line)
+    return m.group(1) if m else ''
+
+
+def _stamp(line):
+    """When a task line last changed: modified, else entry (epoch seconds; 0 if neither)."""
+    v = _field(line, 'modified') or _field(line, 'entry')
+    return int(v) if v.isdigit() else 0
+
+
+def _read_lines(path):
+    try:
+        return [l for l in Path(path).read_text().splitlines() if l.strip()]
+    except OSError:
+        return []
+
+
+def _write_lines(path, lines):
+    Path(path).write_text(''.join(l + '\n' for l in lines))
+
+
+def dedupe_across_files(task_dir):
+    """A task in both pending.data and completed.data (two stations, one completed it, one
+    edited it): keep the newer copy, where it is, and drop the other. Returns notes."""
+    pending_p, completed_p = task_dir / 'pending.data', task_dir / 'completed.data'
+    pending, completed = _read_lines(pending_p), _read_lines(completed_p)
+    in_completed = {}
+    for l in completed:
+        m = UUID_RE.search(l)
+        if m:
+            in_completed[m.group(1)] = l
+    notes, drop_p, drop_c = [], set(), set()
+    for l in pending:
+        m = UUID_RE.search(l)
+        if m and m.group(1) in in_completed:
+            u, other = m.group(1), in_completed[m.group(1)]
+            if _stamp(l) >= _stamp(other):
+                drop_c.add(u)
+                notes.append(f"gittw: task {u[:8]} was in both files: kept the newer, pending copy")
+            else:
+                drop_p.add(u)
+                notes.append(f"gittw: task {u[:8]} was in both files: kept the newer, completed copy")
+    if drop_p:
+        _write_lines(pending_p, [l for l in pending if not (UUID_RE.search(l) and UUID_RE.search(l).group(1) in drop_p)])
+    if drop_c:
+        _write_lines(completed_p, [l for l in completed if not (UUID_RE.search(l) and UUID_RE.search(l).group(1) in drop_c)])
+    return notes
+
+
+def recurrence_report(task_dir):
+    """Templates with more than one pending instance (two stations each spawned one). Reported,
+    never fixed: which to keep is the user's call."""
+    by_template = {}
+    for l in _read_lines(task_dir / 'pending.data'):
+        t = _field(l, 'rtemplate')
+        if t and _field(l, 'status') in ('pending', 'waiting'):
+            by_template.setdefault(t, []).append(_field(l, 'uuid'))
+    return [f"gittw: recurring template {t[:8]} has {len(us)} pending instances "
+            f"({', '.join(u[:8] for u in us)}): keep one, `task <uuid> delete` the rest"
+            for t, us in sorted(by_template.items()) if len(us) > 1]
+
+
+def gc_at_sync(task_dir):
+    """Run Taskwarrior's gc once, now that this station is current (for stations with gc=off)."""
+    if not _yes(setting('gc_at_sync', 'yes', task_dir)) or not shutil.which('task'):
+        return []
+    before = [_read_lines(task_dir / f) for f in DATA_FILES]
+    subprocess.run(['task', f'rc.data.location={task_dir}', 'rc.gc=on', 'rc.hooks=off', 'rc.context=none',
+                    'rc.confirmation=no', 'rc.verbose=nothing', 'count'],
+                   capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    after = [_read_lines(task_dir / f) for f in DATA_FILES]
+    moved = len(before[0]) - len(after[0])
+    return [f"gittw: gc moved {moved} finished task{'s' if moved != 1 else ''} to completed.data"] if moved > 0 else []
+
+
+def after_pull(task_dir):
+    notes = dedupe_across_files(task_dir)
+    notes += gc_at_sync(task_dir)
+    notes += recurrence_report(task_dir)
+    _commit_pending(task_dir, 'gittw: after pull (gc, duplicates)')
+    return notes
+
+
+def write_last_seen(task_dir):
+    d = task_dir / '.stations'
+    d.mkdir(exist_ok=True)
+    now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    (d / station(task_dir)).write_text(
+        f"# gittw: when this station last synced (written by every gittw sync)\n"
+        f"last_sync = {now}\ngittw = {__version__}\n")
+
+
+# ── the merge driver ──────────────────────────────────────────────────────────
+
+def merge_data(base, ours, theirs):
+    """Three-way merge of Taskwarrior data lines by task UUID. Returns (lines, notes).
+
+    A task only one side changed takes that side; both changed it: the later `modified` wins
+    (last write wins per task, as taskd sync did); removed on one side and changed on the
+    other: the change is kept (nothing is lost silently). Ours' order first, then tasks new on
+    their side, so IDs on the ours side stay put."""
+    def index(lines):
+        out = {}
+        for l in lines:
+            m = UUID_RE.search(l)
+            if m:
+                out[m.group(1)] = l
+        return out
+    b, o, t = index(base), index(ours), index(theirs)
+    order = list(o) + [u for u in t if u not in o]
+    result, notes = [], []
+    for u in order:
+        bo, oo, to = b.get(u), o.get(u), t.get(u)
+        if oo == to:
+            pick = oo
+        elif oo == bo:
+            pick = to
+        elif to == bo:
+            pick = oo
+        elif oo and to:
+            pick = oo if _stamp(oo) >= _stamp(to) else to
+            notes.append(f"{u[:8]}: changed on both sides; kept the later ({'ours' if pick is oo else 'theirs'})")
+        else:
+            pick = oo or to
+            notes.append(f"{u[:8]}: removed on one side, changed on the other; kept the change")
+        if pick:
+            result.append(pick)
+    return result, notes
+
+
+def cmd_merge_data(args):
+    """git merge driver: gittw merge-data %O %A %B %P. Writes the result to %A; exit 0 = resolved."""
+    result, notes = merge_data(_read_lines(args.base), _read_lines(args.ours), _read_lines(args.theirs))
+    _write_lines(args.ours, result)
+    if notes:
+        try:
+            gd = subprocess.run(['git', 'rev-parse', '--git-dir'], capture_output=True, text=True).stdout.strip()
+            with open(Path(gd or '.git') / 'gittw-merge.log', 'a') as f:
+                stamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                for n in notes:
+                    f.write(f"{stamp} {args.path}: {n}\n")
+        except OSError:
+            pass
+        print(f"gittw: merged {args.path} by task: " + '; '.join(notes), file=sys.stderr)
+    return 0
+
+
+def merge_driver_configured(task_dir=None):
+    td = task_dir or get_task_dir()
+    r = git(['config', f'merge.{MERGE_DRIVER}.driver'], task_dir=td, capture=True, check=False)
+    return r.returncode == 0 and 'merge-data' in r.stdout
+
+
+def ensure_merge_driver(task_dir=None, quiet=False):
+    """Configure the driver in this clone (.git/config: per clone) and name it in .gitattributes
+    (tracked: shared). Idempotent."""
+    td = task_dir or get_task_dir()
+    me = Path(__file__).resolve()
+    driver = f'{shlex.quote(sys.executable)} {shlex.quote(str(me))} merge-data %O %A %B %P'
+    current = git(['config', f'merge.{MERGE_DRIVER}.driver'], task_dir=td, capture=True, check=False).stdout.strip()
+    if current != driver:
+        git(['config', f'merge.{MERGE_DRIVER}.name', 'gittw: Taskwarrior data, merged by task UUID'], task_dir=td)
+        git(['config', f'merge.{MERGE_DRIVER}.driver', driver], task_dir=td)
+        if not quiet:
+            print(f"Merge driver configured in this clone: {driver}")
+    attrs = td / '.gitattributes'
+    text = attrs.read_text() if attrs.exists() else ''
+    missing = [f for f in DATA_FILES if not re.search(r'^%s\s+merge=%s' % (re.escape(f), MERGE_DRIVER), text, re.M)]
+    if missing:
+        add = ''.join(f'{f} merge={MERGE_DRIVER}\n' for f in missing)
+        sep = '' if not text or text.endswith('\n') else '\n'
+        attrs.write_text(text + sep + '# Taskwarrior data: merged by task UUID (gittw merge-data)\n' + add)
+        if not quiet:
+            print(f"Named the merge driver in .gitattributes for {', '.join(missing)}")
+
+
+def cmd_setup(args):
+    ensure_merge_driver(get_task_dir())
+    print(f"This station is {station()}; merge driver {'ok' if merge_driver_configured() else 'NOT configured'}.")
 
 
 def cmd_undo(args):
@@ -391,6 +705,7 @@ def main():
         prog='gittw',
         description='git-based sync for Taskwarrior'
     )
+    parser.add_argument('--version', action='version', version=f'gittw {__version__}')
     sub = parser.add_subparsers(dest='command', required=True)
 
     p_init = sub.add_parser('init', help='Initialize git repo in ~/.task/')
@@ -398,8 +713,20 @@ def main():
                         help='Optional remote URL (e.g. git@github.com:user/tasks.git)')
     p_init.set_defaults(func=cmd_init)
 
-    p_status = sub.add_parser('status', help='Show working tree status')
+    p_status = sub.add_parser('status', help='Working tree, ahead/behind, incoming by station, stations last seen')
+    p_status.add_argument('--fetch', action='store_true', help='fetch first, so incoming is current')
+    p_status.add_argument('--json', action='store_true', help='as JSON (for clients such as tw-web)')
     p_status.set_defaults(func=cmd_status)
+
+    p_setup = sub.add_parser('setup', help="Configure this clone's merge driver for the task data")
+    p_setup.set_defaults(func=cmd_setup)
+
+    p_merge = sub.add_parser('merge-data', help='(git calls this) merge task data by UUID: %%O %%A %%B %%P')
+    p_merge.add_argument('base')
+    p_merge.add_argument('ours')
+    p_merge.add_argument('theirs')
+    p_merge.add_argument('path', nargs='?', default='')
+    p_merge.set_defaults(func=cmd_merge_data)
 
     p_log = sub.add_parser('log', help='Show recent commits')
     p_log.add_argument('-n', type=int, default=10, metavar='N',
@@ -440,7 +767,7 @@ def main():
     p_remote.set_defaults(func=cmd_remote)
 
     args = parser.parse_args()
-    args.func(args)
+    sys.exit(args.func(args) or 0)
 
 
 if __name__ == '__main__':
