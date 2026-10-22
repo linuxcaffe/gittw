@@ -290,3 +290,30 @@ def test_a_station_keeps_its_manifest_when_the_repo_stops_tracking_it(stations, 
         assert 'stopped tracking config/.tw_manifest' in r.stdout, 'not the modify/delete path: ' + r.stdout
     assert (b.path / 'config' / '.tw_manifest').read_text() == mine
     assert 'config/.tw_manifest' not in b.git('ls-files')
+
+
+# ── a dropped network is retried (0.3.3) ──────────────────────────────────────
+# s5, 2026-10-22: "Read from remote host codeberg.org: Software caused connection abort" mid-pull
+
+ABORT = subprocess.CompletedProcess([], 128, '', 'Read from remote host codeberg.org: Software caused connection abort\n'
+                                                 'fatal: Could not read from remote repository.\n')
+OK = subprocess.CompletedProcess([], 0, '', '')
+
+
+def test_network_trouble_is_retried_then_succeeds():
+    results, waits = [ABORT, ABORT, OK], []
+    r = gittw._network_retry(lambda: results.pop(0), sleep=waits.append)
+    assert r.returncode == 0 and waits == [3, 10]
+
+
+def test_network_trouble_gives_up_after_three_tries():
+    calls, waits = [], []
+    r = gittw._network_retry(lambda: (calls.append(1), ABORT)[1], sleep=waits.append)
+    assert r.returncode == 128 and len(calls) == 3
+
+
+def test_other_failures_are_not_retried():
+    other = subprocess.CompletedProcess([], 1, '', "error: cannot pull with rebase: You have unstaged changes.\n")
+    calls = []
+    r = gittw._network_retry(lambda: (calls.append(1), other)[1], sleep=lambda s: None)
+    assert r is other and len(calls) == 1

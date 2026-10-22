@@ -62,6 +62,10 @@ is undone, the repo is back on its branch with its own commits, and the error na
 (0.3.2; before, the repo was left stopped mid-rebase and every later sync failed). A sync refuses to
 start while a rebase is stopped, and says how to finish or undo it.
 
+**A dropped connection is tried again** (0.3.3): a phone's network drops connections now and then
+("Software caused connection abort" in the middle of a pull). A pull or push that fails that way is
+retried twice, after 3 and 10 seconds; any other failure is reported at once.
+
 **Each station's own records** — `config/.tw_manifest` (what `tw` installed here, with this station's
 paths) isn't shared: new repos ignore it, and when a repo stops tracking it, every station keeps its
 own copy through the pull that drops it (`KEEP_WHEN_UNTRACKED`).
@@ -379,4 +383,4 @@ Core `init`, `sync`, `push`, `pull`, `status`, and `log` commands work. `tw sync
 - Language: Python 3
 - Requires: Git, Python 3.6+
 - Platforms: Linux, Android (Termux)
-- Version: 0.3.2
+- Version: 0.3.3

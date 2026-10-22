@@ -11,6 +11,7 @@ so two stations that both changed tasks between syncs rarely conflict.
 
 import os
 import re
+import time
 import shlex
 import shutil
 import socket
@@ -20,7 +21,7 @@ import argparse
 from datetime import datetime, timezone
 from pathlib import Path
 
-__version__ = '0.3.2'
+__version__ = '0.3.3'
 DATA_FILES = ('pending.data', 'completed.data')
 MERGE_DRIVER = 'twdata'
 
@@ -419,13 +420,33 @@ def _refuse_if_rebase_stopped(task_dir):
         sys.exit(1)
 
 
+# A phone's network drops connections now and then: "Software caused connection abort" mid-pull
+# (s5, 2026-10-22). Those are tried again, twice; any other failure is reported at once.
+NETWORK_TROUBLE = re.compile(r'connection abort|connection reset|connection closed|timed out|could not resolve|'
+                             r'network is unreachable|no route to host|read from remote host|broken pipe|'
+                             r'early eof|unexpected disconnect', re.I)
+
+
+def _network_retry(run, waits=(3, 10), sleep=time.sleep):
+    """run() → CompletedProcess; again after each wait while it fails with network trouble."""
+    r = run()
+    for wait in waits:
+        if r.returncode == 0 or not NETWORK_TROUBLE.search((r.stderr or '') + (r.stdout or '')):
+            return r
+        print(f"The network dropped the connection; trying again in {wait} s.")
+        sleep(wait)
+        r = run()
+    return r
+
+
 def _pull_rebase(task_dir, quiet=True):
     """pull --rebase. A conflict over a KEEP_WHEN_UNTRACKED file the other stations stopped tracking
     is settled their way (untracked), and this station's copy put back. Any other conflict the merge
     driver can't settle is undone, so the repo is back on its branch with its own commits, and the
     files are named: never left stopped mid-rebase."""
     keep = {rel: (task_dir / rel).read_bytes() for rel in KEEP_WHEN_UNTRACKED if (task_dir / rel).is_file()}
-    r = git(['pull', '--rebase'] + (['-q'] if quiet else []), task_dir=task_dir, check=False, capture=True)
+    r = _network_retry(lambda: git(['pull', '--rebase'] + (['-q'] if quiet else []), task_dir=task_dir,
+                                   check=False, capture=True))
     conflicted = []
     while r.returncode != 0 and _rebase_stopped(task_dir):
         conflicted = git(['diff', '--name-only', '--diff-filter=U'], task_dir=task_dir,
@@ -500,7 +521,10 @@ def cmd_sync(args):
     _commit_pending(task_dir, f'gittw: {station(task_dir)} synced')
 
     print("Pushing...")
-    git(['push', '-q'], task_dir=task_dir)
+    r = _network_retry(lambda: git(['push', '-q'], task_dir=task_dir, check=False, capture=True))
+    if r.returncode != 0:
+        print((r.stderr or r.stdout).strip(), file=sys.stderr)
+        sys.exit(r.returncode)
 
     print("Sync complete.")
 
