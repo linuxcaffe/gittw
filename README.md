@@ -370,4 +370,4 @@ Core `init`, `sync`, `push`, `pull`, `status`, and `log` commands work. `tw sync
 - Language: Python 3
 - Requires: Git, Python 3.6+
 - Platforms: Linux, Android (Termux)
-- Version: 0.3.0
+- Version: 0.3.1

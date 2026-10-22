@@ -20,7 +20,7 @@ import argparse
 from datetime import datetime, timezone
 from pathlib import Path
 
-__version__ = '0.3.0'
+__version__ = '0.3.1'
 DATA_FILES = ('pending.data', 'completed.data')
 MERGE_DRIVER = 'twdata'
 
@@ -158,7 +158,15 @@ def _commit_pending(task_dir, message=None):
         now = datetime.now().strftime('%Y-%m-%d %H:%M')
         message = f'gittw: {now} ({n} file{"s" if n != 1 else ""} changed)'
     subprocess.run(['git', '-C', str(task_dir), 'add', '-A'], check=True)
-    subprocess.run(['git', '-C', str(task_dir), 'commit', '-q', '-m', with_station(message, task_dir)], check=True)
+    r = subprocess.run(['git', '-C', str(task_dir), 'commit', '-q', '-m', with_station(message, task_dir)],
+                       capture_output=True, text=True)
+    if r.returncode:
+        err = (r.stderr or r.stdout).strip()
+        if 'user.email' in err or 'user.name' in err or 'who you are' in err:
+            sys.exit(f"gittw: git can't commit on this station: it has no name and email. Set them for "
+                     f"{task_dir}:\n  git -C {task_dir} config user.name 'Your Name'\n"
+                     f"  git -C {task_dir} config user.email you@example.com")
+        sys.exit(f"gittw: git commit failed: {err}")
     return True
 
 

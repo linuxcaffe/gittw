@@ -221,3 +221,15 @@ def test_recurrence_report_names_a_template_with_two_pending_instances(tmp_path)
         line(U3, 'other', 1)]) + '\n')
     [note] = gittw.recurrence_report(tmp_path)
     assert '99999999' in note and '2 pending instances' in note
+
+
+def test_sync_without_a_git_identity_says_how_to_set_one(stations, tmp_path):
+    a, b = stations
+    env = {k: v for k, v in b.env.items() if not k.startswith(('GIT_AUTHOR', 'GIT_COMMITTER'))}
+    env['EMAIL'] = ''
+    b.env = env
+    b.task('add', '--', 'from b')
+    r = b.gittw('sync', ok=False)
+    assert r.returncode != 0
+    assert 'no name and email' in r.stderr and 'config user.email' in r.stderr
+    assert 'Traceback' not in r.stderr
