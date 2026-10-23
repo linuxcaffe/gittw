@@ -66,6 +66,12 @@ start while a rebase is stopped, and says how to finish or undo it.
 ("Software caused connection abort" in the middle of a pull). A pull or push that fails that way is
 retried twice, after 3 and 10 seconds; any other failure is reported at once.
 
+**A mirror that refuses a push doesn't fail the sync** (0.3.5): with two push URLs on `origin`
+(Codeberg + GitHub), a push that reached only one leaves the other out of step, and git refuses every
+later push there. When the URL `origin` fetches from has the commit, the sync succeeds and says which
+mirror refused, why, and the command that makes it match (`git push --force <mirror> HEAD:<branch>`;
+gittw never forces a push itself). A refusal at the main remote is still a failed sync.
+
 **What `tw` installed** — `config/.tw_manifest`. tw before 2.18.0 wrote it with each station's own
 absolute paths, so a shared copy conflicted at every install, and repos stopped tracking it: every
 station keeps its own copy through the pull that drops it (`KEEP_WHEN_UNTRACKED`, 0.3.2). tw 2.18.0
@@ -386,4 +392,4 @@ Core `init`, `sync`, `push`, `pull`, `status`, and `log` commands work. `tw sync
 - Language: Python 3
 - Requires: Git, Python 3.6+
 - Platforms: Linux, Android (Termux)
-- Version: 0.3.4
+- Version: 0.3.5

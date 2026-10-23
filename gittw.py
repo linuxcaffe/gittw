@@ -21,7 +21,7 @@ import argparse
 from datetime import datetime, timezone
 from pathlib import Path
 
-__version__ = '0.3.4'
+__version__ = '0.3.5'
 DATA_FILES = ('pending.data', 'completed.data')
 MERGE_DRIVER = 'twdata'
 
@@ -509,6 +509,34 @@ def cmd_push(args):
     git(['push'] + extra, task_dir=task_dir)
 
 
+def _mirrors_refused(task_dir, output):
+    """[(url, why, branch)] when a push failed only at a mirror: the upstream remote has a second push
+    URL (Codeberg + GitHub), and the URL it fetches from has this HEAD. Else [] (a real failure).
+    2026-10-23: a push that reached only GitHub left it diverged, and every sync after failed there."""
+    q = lambda *a: git(list(a), task_dir=task_dir, check=False, capture=True).stdout.strip()
+    upstream = q('rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}')
+    if '/' not in upstream:
+        return []
+    remote, branch = upstream.split('/', 1)
+    main = q('remote', 'get-url', remote)
+    mirrors = [u for u in q('remote', 'get-url', '--push', '--all', remote).splitlines() if u and u != main]
+    if not main or not mirrors:
+        return []
+    there = _network_retry(lambda: git(['ls-remote', main, f'refs/heads/{branch}'], task_dir=task_dir,
+                                       check=False, capture=True))
+    if there.returncode != 0 or there.stdout.split()[:1] != [q('rev-parse', 'HEAD')]:
+        return []
+    refused, url = [], None
+    for line in output.splitlines():
+        if line.startswith('To '):
+            url = line[3:].strip()
+        elif line.lstrip().startswith('!') and url in mirrors:
+            why = line[line.rfind('(') + 1:line.rfind(')')] if '(' in line else line.strip()
+            refused.append((url, why, branch))
+            url = None
+    return refused or [(u, 'push failed', branch) for u in mirrors]
+
+
 def cmd_sync(args):
     """Commit local changes, pull (rebase, merging task data by UUID), tidy up, record this
     station's sync, then push."""
@@ -534,8 +562,15 @@ def cmd_sync(args):
     print("Pushing...")
     r = _network_retry(lambda: git(['push', '-q'], task_dir=task_dir, check=False, capture=True))
     if r.returncode != 0:
-        print((r.stderr or r.stdout).strip(), file=sys.stderr)
-        sys.exit(r.returncode)
+        output = (r.stderr or r.stdout).strip()
+        refused = _mirrors_refused(task_dir, output)
+        if not refused:
+            print(output, file=sys.stderr)
+            sys.exit(r.returncode)
+        for url, why, branch in refused:
+            print(f"gittw: the mirror {url} refused the push ({why}); the main remote has everything.\n"
+                  f"  To make the mirror match it: git -C {task_dir} push --force {url} HEAD:{branch}",
+                  file=sys.stderr)
 
     print("Sync complete.")
 

@@ -347,3 +347,50 @@ def test_other_failures_are_not_retried():
     calls = []
     r = gittw._network_retry(lambda: (calls.append(1), other)[1], sleep=lambda s: None)
     assert r is other and len(calls) == 1
+
+
+# ── a mirror (a second push URL) that refuses doesn't fail the sync (2026-10-23) ──
+
+def with_mirror(a, tmp_path):
+    """origin pushes to the remote and a mirror, as yoga's and s5's do (Codeberg + GitHub)."""
+    remote, mirror = tmp_path / 'remote.git', tmp_path / 'mirror.git'
+    run(['git', 'clone', '-q', '--bare', str(remote), str(mirror)], a.env)
+    for url in (remote, mirror):
+        run(['git', '-C', str(a.path), 'remote', 'set-url', '--add', '--push', 'origin', str(url)], a.env)
+    return remote, mirror
+
+
+def diverge(mirror, a, tmp_path):
+    """The mirror got a commit the remote never did (a push that reached only the mirror)."""
+    other = tmp_path / 'other'
+    run(['git', 'clone', '-q', str(mirror), str(other)], a.env)
+    (other / 'stray').write_text('x\n')
+    run(['git', '-C', str(other), 'add', 'stray'], a.env)
+    run(['git', '-C', str(other), 'commit', '-qm', 'stray'], a.env)
+    run(['git', '-C', str(other), 'push', '-q'], a.env)
+
+
+def test_a_refusing_mirror_warns_and_the_sync_succeeds(stations, tmp_path):
+    a, _ = stations
+    remote, mirror = with_mirror(a, tmp_path)
+    diverge(mirror, a, tmp_path)
+    a.task('add', '--', 'after the stray')
+    r = a.gittw('sync')                                           # exit 0
+    head = a.git('rev-parse', 'HEAD').strip()
+    assert run(['git', '-C', str(remote), 'rev-parse', 'master'], a.env).stdout.strip() == head
+    assert f'gittw: the mirror {mirror} refused the push' in r.stderr
+    assert ('(fetch first)' in r.stderr or '(non-fast-forward)' in r.stderr)          # git's reason
+    assert f'push --force {mirror} HEAD:master' in r.stderr
+    assert 'Sync complete.' in r.stdout
+
+
+def test_a_refusing_main_remote_still_fails(stations, tmp_path):
+    a, _ = stations
+    remote, mirror = with_mirror(a, tmp_path)
+    hook = remote / 'hooks' / 'pre-receive'
+    hook.write_text('#!/bin/sh\necho "remote says no" >&2\nexit 1\n')
+    hook.chmod(0o755)
+    a.task('add', '--', 'cannot land')
+    r = a.gittw('sync', ok=False)
+    assert r.returncode != 0 and 'refused the push' not in r.stderr
+    assert 'remote says no' in r.stderr
