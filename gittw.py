@@ -21,7 +21,7 @@ import argparse
 from datetime import datetime, timezone
 from pathlib import Path
 
-__version__ = '0.3.3'
+__version__ = '0.3.4'
 DATA_FILES = ('pending.data', 'completed.data')
 MERGE_DRIVER = 'twdata'
 
@@ -49,8 +49,6 @@ GITIGNORE = """\
 undo.data
 backlog.data
 *.lock
-# each station's own install record (tw writes this station's paths)
-config/.tw_manifest
 
 # Debug and cache logs
 logs/
@@ -397,7 +395,10 @@ def cmd_log(args):
 
 
 # Each station's own record, which a repo may stop tracking: a station keeps its copy when it does.
-# tw writes .tw_manifest with this station's absolute paths, so a shared copy conflicts at every install.
+# tw before 2.18.0 wrote .tw_manifest with this station's absolute paths, so a shared copy conflicted
+# at every install, and repos stopped tracking it (gittw 0.3.2). tw 2.18.0 writes ~/.task paths, and a
+# repo may track it again: then a station's untracked copy gives way to the shared one, and is kept
+# in .git/gittw-kept/ (0.3.4).
 KEEP_WHEN_UNTRACKED = ('config/.tw_manifest',)
 
 
@@ -445,6 +446,8 @@ def _pull_rebase(task_dir, quiet=True):
     driver can't settle is undone, so the repo is back on its branch with its own commits, and the
     files are named: never left stopped mid-rebase."""
     keep = {rel: (task_dir / rel).read_bytes() for rel in KEEP_WHEN_UNTRACKED if (task_dir / rel).is_file()}
+    tracked_before = {rel for rel in keep if git(['ls-files', '--error-unmatch', rel], task_dir=task_dir,
+                                                 check=False, capture=True).returncode == 0}
     r = _network_retry(lambda: git(['pull', '--rebase'] + (['-q'] if quiet else []), task_dir=task_dir,
                                    check=False, capture=True))
     conflicted = []
@@ -463,6 +466,14 @@ def _pull_rebase(task_dir, quiet=True):
         print(f"The other stations stopped tracking {', '.join(conflicted)}; so does this one, keeping its copy.")
     for rel, data in keep.items():
         tracked = git(['ls-files', '--error-unmatch', rel], task_dir=task_dir, check=False, capture=True).returncode == 0
+        if tracked and rel not in tracked_before and (task_dir / rel).is_file() \
+                and (task_dir / rel).read_bytes() != data:
+            kept = Path(git(['rev-parse', '--git-dir'], task_dir=task_dir, capture=True).stdout.strip())
+            kept = (kept if kept.is_absolute() else task_dir / kept) / 'gittw-kept' / rel
+            kept.parent.mkdir(parents=True, exist_ok=True)
+            kept.write_bytes(data)
+            print(f"The other stations track {rel} again; this station takes theirs "
+                  f"(its own copy is in {kept}).")
         if not tracked and not (task_dir / rel).exists():
             (task_dir / rel).parent.mkdir(parents=True, exist_ok=True)   # git removes a folder it emptied
             (task_dir / rel).write_bytes(data)

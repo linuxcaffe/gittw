@@ -292,6 +292,36 @@ def test_a_station_keeps_its_manifest_when_the_repo_stops_tracking_it(stations, 
     assert 'config/.tw_manifest' not in b.git('ls-files')
 
 
+@pytest.mark.parametrize('b_changed_it', [True, False])
+def test_a_station_takes_the_manifest_when_the_repo_tracks_it_again(stations, b_changed_it):
+    """tw 2.18.0 writes portable paths, so the manifest is shared again (gittw 0.3.4). A station
+    still holding its own untracked copy takes the shared one; its copy is kept under .git."""
+    a, b = stations
+    for st in (a, b):
+        (st.path / 'config').mkdir(exist_ok=True)
+    (a.path / '.gitignore').write_text((a.path / '.gitignore').read_text() + 'config/.tw_manifest\n')
+    a.git('add', '.gitignore')
+    a.git('commit', '-qm', 'ignore the manifest')
+    a.gittw('sync')
+    b.gittw('sync')
+    mine = 'app|1.0|/data/b/.task/x||t\n' if b_changed_it else 'app|1.0|~/.task/x||t\n'
+    (b.path / 'config' / '.tw_manifest').write_text(mine)
+    b.task('add', '--', 'b work')
+    (a.path / 'config' / '.tw_manifest').write_text('app|1.0|~/.task/x||t\n')
+    (a.path / '.gitignore').write_text((a.path / '.gitignore').read_text().replace('config/.tw_manifest\n', ''))
+    a.git('add', '.gitignore', 'config/.tw_manifest')
+    a.git('commit', '-qm', 'track the manifest again')
+    a.gittw('sync')
+    r = b.gittw('sync')
+    assert not in_rebase(b)
+    assert (b.path / 'config' / '.tw_manifest').read_text() == 'app|1.0|~/.task/x||t\n'
+    assert 'config/.tw_manifest' in b.git('ls-files')
+    assert 'b work' in a.descriptions() or (a.gittw('sync') and 'b work' in a.descriptions())
+    if b_changed_it:
+        assert (b.path / '.git' / 'gittw-kept' / 'config' / '.tw_manifest').read_text() == mine
+        assert 'track config/.tw_manifest again' in r.stdout, r.stdout
+
+
 # ── a dropped network is retried (0.3.3) ──────────────────────────────────────
 # s5, 2026-10-22: "Read from remote host codeberg.org: Software caused connection abort" mid-pull
 

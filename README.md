@@ -66,9 +66,12 @@ start while a rebase is stopped, and says how to finish or undo it.
 ("Software caused connection abort" in the middle of a pull). A pull or push that fails that way is
 retried twice, after 3 and 10 seconds; any other failure is reported at once.
 
-**Each station's own records** — `config/.tw_manifest` (what `tw` installed here, with this station's
-paths) isn't shared: new repos ignore it, and when a repo stops tracking it, every station keeps its
-own copy through the pull that drops it (`KEEP_WHEN_UNTRACKED`).
+**What `tw` installed** — `config/.tw_manifest`. tw before 2.18.0 wrote it with each station's own
+absolute paths, so a shared copy conflicted at every install, and repos stopped tracking it: every
+station keeps its own copy through the pull that drops it (`KEEP_WHEN_UNTRACKED`, 0.3.2). tw 2.18.0
+writes `~/.task/…` paths, so the file is the same on every station and a repo can track it again
+(0.3.4): a station still holding its own untracked copy takes the shared one, and its copy is kept
+in `.git/gittw-kept/`. New repos no longer ignore it.
 
 **gc at sync** — with `gc=off` in `.taskrc`, Taskwarrior never renumbers IDs or moves finished tasks
 on its own; `gittw sync` runs gc once, right after pulling, when this station is current, and commits
@@ -383,4 +386,4 @@ Core `init`, `sync`, `push`, `pull`, `status`, and `log` commands work. `tw sync
 - Language: Python 3
 - Requires: Git, Python 3.6+
 - Platforms: Linux, Android (Termux)
-- Version: 0.3.3
+- Version: 0.3.4
