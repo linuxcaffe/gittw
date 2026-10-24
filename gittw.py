@@ -21,9 +21,15 @@ import argparse
 from datetime import datetime, timezone
 from pathlib import Path
 
-__version__ = '0.3.5'
+__version__ = '0.3.6'
 DATA_FILES = ('pending.data', 'completed.data')
 MERGE_DRIVER = 'twdata'
+# tw-events' files: yours only ever gets lines appended, so both sides' lines are kept; the
+# generated ones are rebuilt from it after the pull (events_after_pull), so either side will do.
+KEEP_DRIVER = 'gittw-keep'
+EVENTS_ATTRS = (('config/my-events.txt', 'union'),
+                ('config/holidays.rc', KEEP_DRIVER), ('config/sky.rc', KEEP_DRIVER),
+                ('config/mine.rc', KEEP_DRIVER))
 
 
 def get_task_dir():
@@ -656,8 +662,27 @@ def gc_at_sync(task_dir):
     return [f"gittw: gc moved {moved} finished task{'s' if moved != 1 else ''} to completed.data"] if moved > 0 else []
 
 
+def events_after_pull(task_dir):
+    """tw-events 0.3.1+: rebuild its generated files from the merged settings and my-events.txt,
+    offline. Nothing when it isn't installed (or is older and has no --no-fetch)."""
+    ev = task_dir / 'scripts' / 'events'
+    if not (ev.is_file() and (task_dir / 'config' / 'events.rc').is_file()):
+        return []
+    try:
+        if b'--no-fetch' not in ev.read_bytes():
+            return []
+        r = subprocess.run([str(ev), 'refresh', '--no-fetch'], capture_output=True, text=True, timeout=60,
+                           stdin=subprocess.DEVNULL, env=dict(os.environ, TW_TASK_DIR=str(task_dir)))
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return [f"gittw: events refresh --no-fetch failed: {e}"]
+    if r.returncode == 2:
+        return [f"gittw: events refresh --no-fetch failed: {(r.stdout + r.stderr).strip()[-300:]}"]
+    return []
+
+
 def after_pull(task_dir):
     notes = dedupe_across_files(task_dir)
+    notes += events_after_pull(task_dir)
     notes += gc_at_sync(task_dir)
     notes += recurrence_report(task_dir)
     _commit_pending(task_dir, 'gittw: after pull (gc, duplicates)')
@@ -746,15 +771,22 @@ def ensure_merge_driver(task_dir=None, quiet=False):
         git(['config', f'merge.{MERGE_DRIVER}.driver', driver], task_dir=td)
         if not quiet:
             print(f"Merge driver configured in this clone: {driver}")
+    if git(['config', f'merge.{KEEP_DRIVER}.driver'], task_dir=td, capture=True, check=False).stdout.strip() != 'true':
+        git(['config', f'merge.{KEEP_DRIVER}.name', 'gittw: a generated file, rebuilt after the pull'], task_dir=td)
+        git(['config', f'merge.{KEEP_DRIVER}.driver', 'true'], task_dir=td)
     attrs = td / '.gitattributes'
-    text = attrs.read_text() if attrs.exists() else ''
-    missing = [f for f in DATA_FILES if not re.search(r'^%s\s+merge=%s' % (re.escape(f), MERGE_DRIVER), text, re.M)]
-    if missing:
-        add = ''.join(f'{f} merge={MERGE_DRIVER}\n' for f in missing)
-        sep = '' if not text or text.endswith('\n') else '\n'
-        attrs.write_text(text + sep + '# Taskwarrior data: merged by task UUID (gittw merge-data)\n' + add)
-        if not quiet:
-            print(f"Named the merge driver in .gitattributes for {', '.join(missing)}")
+    for comment, pairs in (('# Taskwarrior data: merged by task UUID (gittw merge-data)',
+                            [(f, MERGE_DRIVER) for f in DATA_FILES]),
+                           ("# tw-events: your events keep both sides' lines; its generated files are rebuilt "
+                            "after a pull", EVENTS_ATTRS)):
+        text = attrs.read_text() if attrs.exists() else ''
+        missing = [(f, m) for f, m in pairs if not re.search(r'^%s\s+merge=%s' % (re.escape(f), re.escape(m)), text, re.M)]
+        if missing:
+            add = ''.join(f'{f} merge={m}\n' for f, m in missing)
+            sep = '' if not text or text.endswith('\n') else '\n'
+            attrs.write_text(text + sep + comment + '\n' + add)
+            if not quiet:
+                print(f"Named the merge drivers in .gitattributes for {', '.join(f for f, _ in missing)}")
 
 
 def cmd_setup(args):

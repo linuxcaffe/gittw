@@ -62,6 +62,12 @@ is undone, the repo is back on its branch with its own commits, and the error na
 (0.3.2; before, the repo was left stopped mid-rebase and every later sync failed). A sync refuses to
 start while a rebase is stopped, and says how to finish or undo it.
 
+**tw-events' files never stop a sync** (0.3.6): `config/my-events.txt` only ever gets lines added,
+so it merges as a union (both stations' new events are kept). The files tw-events generates
+(`holidays.rc`, `sky.rc`, `mine.rc`) take either side (the `gittw-keep` driver), and after the pull
+`sync` runs `events refresh --no-fetch` (tw-events 0.3.1+, offline), which rebuilds them from the merged
+settings and events.
+
 **A dropped connection is tried again** (0.3.3): a phone's network drops connections now and then
 ("Software caused connection abort" in the middle of a pull). A pull or push that fails that way is
 retried twice, after 3 and 10 seconds; any other failure is reported at once.

@@ -394,3 +394,71 @@ def test_a_refusing_main_remote_still_fails(stations, tmp_path):
     r = a.gittw('sync', ok=False)
     assert r.returncode != 0 and 'refused the push' not in r.stderr
     assert 'remote says no' in r.stderr
+
+
+# ── tw-events' files: my-events.txt merges as a union, the generated ones never stop a sync ──
+
+def _commit(st, msg):
+    st.git('add', '-A')
+    st.git('commit', '-qm', msg)
+
+
+def test_my_events_from_both_stations_are_both_kept(stations):
+    a, b = stations
+    b.gittw('sync')
+    for st in (a, b):
+        (st.path / 'config').mkdir(exist_ok=True)
+    (a.path / 'config' / 'my-events.txt').write_text('# mine\n')
+    _commit(a, 'my events'); a.gittw('sync'); b.gittw('sync')
+    with open(a.path / 'config' / 'my-events.txt', 'a') as f:
+        f.write('2026-10-29  From a\n')
+    with open(b.path / 'config' / 'my-events.txt', 'a') as f:
+        f.write('2026-10-30  From b\n')
+    a.gittw('sync'); b.gittw('sync'); a.gittw('sync')
+    for st in (a, b):
+        text = (st.path / 'config' / 'my-events.txt').read_text()
+        assert 'From a' in text and 'From b' in text and '<<<<' not in text
+        assert not gittw._rebase_stopped(st.path)
+
+
+def test_generated_events_files_that_differ_do_not_stop_a_sync(stations):
+    a, b = stations
+    b.gittw('sync')
+    for st, n in ((a, 1), (b, 2)):          # both new on each side: an add/add
+        (st.path / 'config').mkdir(exist_ok=True)
+        for f in ('holidays.rc', 'sky.rc', 'mine.rc'):
+            (st.path / 'config' / f).write_text(f'# events: {st.name}\nholiday.me2026102{n}a.name=x\n')
+    a.gittw('sync')
+    r = b.gittw('sync')
+    assert 'Sync complete' in r.stdout
+    assert not gittw._rebase_stopped(b.path)
+    assert '<<<<' not in (b.path / 'config' / 'mine.rc').read_text()
+
+
+def test_after_a_pull_events_rebuilds_its_files_offline(stations):
+    a, b = stations
+    for st in (a, b):
+        (st.path / 'scripts').mkdir(exist_ok=True)
+        (st.path / 'config').mkdir(exist_ok=True)
+        (st.path / 'config' / 'events.rc').write_text('events.locale = en-CA\n')
+        ev = st.path / 'scripts' / 'events'
+        ev.write_text('#!/bin/sh\n# supports --no-fetch\n'
+                      'echo "$TW_TASK_DIR $*" >> "$TW_TASK_DIR/events-calls"\n')
+        ev.chmod(0o755)
+    (a.path / '.gitignore').write_text((a.path / '.gitignore').read_text() + 'events-calls\n')
+    _commit(a, 'events'); a.gittw('sync')
+    b.gittw('sync')
+    calls = (b.path / 'events-calls').read_text().splitlines()
+    assert calls and calls[-1] == f'{b.path} refresh --no-fetch'
+
+
+def test_an_events_without_no_fetch_is_left_alone(stations):
+    a, b = stations
+    (b.path / 'scripts').mkdir(exist_ok=True)
+    (b.path / 'config').mkdir(exist_ok=True)
+    (b.path / 'config' / 'events.rc').write_text('')
+    ev = b.path / 'scripts' / 'events'
+    ev.write_text('#!/bin/sh\ntouch "$TW_TASK_DIR/ran"\nexit 2\n')     # tw-events 0.3.0 and older
+    ev.chmod(0o755)
+    r = b.gittw('sync')
+    assert not (b.path / 'ran').exists() and 'events' not in r.stderr
