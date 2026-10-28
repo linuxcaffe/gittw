@@ -72,11 +72,11 @@ settings and events.
 ("Software caused connection abort" in the middle of a pull). A pull or push that fails that way is
 retried twice, after 3 and 10 seconds; any other failure is reported at once.
 
-**A mirror that refuses a push doesn't fail the sync** (0.3.5): with two push URLs on `origin`
-(Codeberg + GitHub), a push that reached only one leaves the other out of step, and git refuses every
-later push there. When the URL `origin` fetches from has the commit, the sync succeeds and says which
-mirror refused, why, and the command that makes it match (`git push --force <mirror> HEAD:<branch>`;
-gittw never forces a push itself). A refusal at the main remote is still a failed sync.
+**The mirror gets only what the main remote took** (0.3.7): with two push URLs on `origin`
+(Codeberg + GitHub), gittw pushes to the URL `origin` fetches from first, and to the mirror only once
+that succeeded. The mirror is a copy that nothing reads, so its push is forced: a mirror left out of
+step (a push that reached only it, before 0.3.7) is put right at the next sync. A refusal at the main
+remote is a failed sync and the mirror gets nothing; a mirror that's unreachable only warns.
 
 **What `tw` installed** — `config/.tw_manifest`. tw before 2.18.0 wrote it with each station's own
 absolute paths, so a shared copy conflicted at every install, and repos stopped tracking it: every
