@@ -133,14 +133,11 @@ pkg install python git openssh
 
 #### 2. Install Taskwarrior 2.6.x
 
-The Termux `taskwarrior` package is TW3 and will conflict. A pre-built TW 2.6.2 `.deb` for `aarch64` is included in this repo. The cleanest way to transfer it is `scp` directly into the Termux home — no Android storage permissions needed:
+The Termux `taskwarrior` package is TW3. Taskwarrior 2.6.2 for Termux (the `task2` deb, which `pkg upgrade`
+never swaps for 3.x) comes from [taskwarrior-2.6](https://github.com/linuxcaffe/taskwarrior-2.6):
 
 ```bash
-# On your desktop:
-scp task2_2.6.2-3_aarch64.deb phone:~/
-
-# On the phone in Termux:
-dpkg -i ~/task2_2.6.2-3_aarch64.deb
+curl -fsSL https://raw.githubusercontent.com/linuxcaffe/taskwarrior-2.6/main/install.sh | bash
 task --version   # should report 2.6.2
 ```
 
