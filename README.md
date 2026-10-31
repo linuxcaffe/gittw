@@ -60,7 +60,14 @@ ended up with two pending instances (two stations each made one): which to keep 
 **A conflict gittw can't merge** (a file other than the task data, both sides changed it): the pull
 is undone, the repo is back on its branch with its own commits, and the error names the files
 (0.3.2; before, the repo was left stopped mid-rebase and every later sync failed). A sync refuses to
-start while a rebase is stopped, and says how to finish or undo it.
+start while a rebase is stopped, and says how to finish or undo it (undoing it loses what `task`
+wrote since the pull stopped: copy `*.data` aside first).
+
+**A sync stopped from outside undoes its pull** (0.3.8): a hangup (the terminal or server that started
+gittw closed), a terminate or an interrupt during the pull makes gittw undo the rebase before it exits,
+so the repo is back on its branch with its own commits. Before, git died with gittw and left the repo
+stopped mid-rebase (s5, 2026-10-30: tw-web's auto-sync got a hangup; the phone didn't sync for 16 h).
+A SIGKILL can't be caught: a caller's timeout should send SIGTERM first.
 
 **tw-events' files never stop a sync** (0.3.6): `config/my-events.txt` only ever gets lines added,
 so it merges as a union (both stations' new events are kept). The files tw-events generates
@@ -83,7 +90,9 @@ absolute paths, so a shared copy conflicted at every install, and repos stopped 
 station keeps its own copy through the pull that drops it (`KEEP_WHEN_UNTRACKED`, 0.3.2). tw 2.18.0
 writes `~/.task/…` paths, so the file is the same on every station and a repo can track it again
 (0.3.4): a station still holding its own untracked copy takes the shared one, and its copy is kept
-in `.git/gittw-kept/`. New repos no longer ignore it.
+in `.git/gittw-kept/`. New repos no longer ignore it. Two stations installing the same app no longer
+conflict (0.3.8): the manifest merges as a union (each install only adds lines, so both stations' are
+kept), and `.tw_manifest.bak`, the manifest before the last install, takes either side (`gittw-keep`).
 
 **gc at sync** — with `gc=off` in `.taskrc`, Taskwarrior never renumbers IDs or moves finished tasks
 on its own; `gittw sync` runs gc once, right after pulling, when this station is current, and commits
@@ -395,4 +404,4 @@ Core `init`, `sync`, `push`, `pull`, `status`, and `log` commands work. `tw sync
 - Language: Python 3
 - Requires: Git, Python 3.6+
 - Platforms: Linux, Android (Termux)
-- Version: 0.3.5
+- Version: 0.3.8

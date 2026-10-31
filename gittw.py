@@ -13,6 +13,7 @@ import os
 import re
 import time
 import shlex
+import signal
 import shutil
 import socket
 import sys
@@ -21,7 +22,7 @@ import argparse
 from datetime import datetime, timezone
 from pathlib import Path
 
-__version__ = '0.3.7'
+__version__ = '0.3.8'
 DATA_FILES = ('pending.data', 'completed.data')
 MERGE_DRIVER = 'twdata'
 # tw-events' files: yours only ever gets lines appended, so both sides' lines are kept; the
@@ -30,6 +31,9 @@ KEEP_DRIVER = 'gittw-keep'
 EVENTS_ATTRS = (('config/my-events.txt', 'union'),
                 ('config/holidays.rc', KEEP_DRIVER), ('config/sky.rc', KEEP_DRIVER),
                 ('config/mine.rc', KEEP_DRIVER))
+# tw's install manifest: each install appends its lines, so both sides' lines are kept; the .bak is
+# only the manifest before the last install, so either side will do (s5 and yoga, t 1.4.0, 2026-10-30).
+MANIFEST_ATTRS = (('config/.tw_manifest', 'union'), ('config/.tw_manifest.bak', KEEP_DRIVER))
 
 
 def get_task_dir():
@@ -423,7 +427,9 @@ def _refuse_if_rebase_stopped(task_dir):
     if _rebase_stopped(task_dir):
         print(f"gittw: {task_dir} is stopped in the middle of a rebase (an earlier pull conflicted).\n"
               f"  Finish it: fix the files `git -C {task_dir} status` names, git add them, git rebase --continue\n"
-              f"  Or undo it: git -C {task_dir} rebase --abort   (your local commits stay)", file=sys.stderr)
+              f"  Or undo it: git -C {task_dir} rebase --abort   (your local commits stay, but changes made since\n"
+              f"  the pull stopped are lost: task writes to the half-rebased files, so copy *.data aside first)",
+              file=sys.stderr)
         sys.exit(1)
 
 
@@ -446,7 +452,44 @@ def _network_retry(run, waits=(3, 10), sleep=time.sleep):
     return r
 
 
+class _Stopped(Exception):
+    """A signal arrived during the pull (gittw's own handler raises it)."""
+
+
+def _stopped(signum, frame):
+    raise _Stopped(signum)
+
+
 def _pull_rebase(task_dir, quiet=True):
+    """_pull_rebase_once, undone if a signal stops it: a hangup (the terminal that started gittw, or
+    the server that runs it, closed), a terminate or an interrupt. Otherwise git, killed along with
+    gittw, leaves the repo stopped mid-rebase and every later sync refuses (s5, 2026-10-30: tw-web's
+    auto-sync got SIGHUP). SIGKILL can't be caught: a caller's timeout should send SIGTERM first."""
+    names = ('SIGHUP', 'SIGTERM', 'SIGINT')
+    sigs = [getattr(signal, n) for n in names if hasattr(signal, n)]
+    old = {s: signal.signal(s, _stopped) for s in sigs}
+    try:
+        _pull_rebase_once(task_dir, quiet)
+    except _Stopped as e:
+        for s in sigs:
+            signal.signal(s, signal.SIG_IGN)          # the clean-up isn't stopped in turn
+        undone = _rebase_stopped(task_dir)
+        if undone:
+            git(['rebase', '--abort'], task_dir=task_dir, check=False, capture=True)
+        name = signal.Signals(e.args[0]).name
+        if _rebase_stopped(task_dir):
+            print(f"gittw: stopped by {name} during the pull, and the rebase couldn't be undone.\n"
+                  f"  See git -C {task_dir} status", file=sys.stderr)
+        else:
+            print(f"gittw: stopped by {name} during the pull; "
+                  f"{'undone' if undone else 'nothing to undo'}, your local commits stay.", file=sys.stderr)
+        sys.exit(128 + e.args[0])
+    finally:
+        for s, h in old.items():
+            signal.signal(s, h)
+
+
+def _pull_rebase_once(task_dir, quiet=True):
     """pull --rebase. A conflict over a KEEP_WHEN_UNTRACKED file the other stations stopped tracking
     is settled their way (untracked), and this station's copy put back. Any other conflict the merge
     driver can't settle is undone, so the repo is back on its branch with its own commits, and the
@@ -782,7 +825,9 @@ def ensure_merge_driver(task_dir=None, quiet=False):
     for comment, pairs in (('# Taskwarrior data: merged by task UUID (gittw merge-data)',
                             [(f, MERGE_DRIVER) for f in DATA_FILES]),
                            ("# tw-events: your events keep both sides' lines; its generated files are rebuilt "
-                            "after a pull", EVENTS_ATTRS)):
+                            "after a pull", EVENTS_ATTRS),
+                           ("# tw's install manifest: both stations' install lines are kept; the .bak takes "
+                            "either side", MANIFEST_ATTRS)):
         text = attrs.read_text() if attrs.exists() else ''
         missing = [(f, m) for f, m in pairs if not re.search(r'^%s\s+merge=%s' % (re.escape(f), re.escape(m)), text, re.M)]
         if missing:

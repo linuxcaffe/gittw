@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -266,7 +267,48 @@ def test_sync_refuses_while_a_rebase_is_stopped(stations):
     (b.path / '.git' / 'rebase-merge').mkdir()
     r = b.gittw('sync', ok=False)
     assert r.returncode != 0 and 'middle of a rebase' in r.stderr and 'rebase --abort' in r.stderr
+    assert 'lost' in r.stderr, 'the abort discards changes made since: say so'
     assert (b.path / '.git' / 'rebase-merge').exists(), 'a stopped rebase is yours to finish or undo'
+
+
+# ── A sync stopped from outside (s5, 2026-10-30: tw-web's Termux session closed, SIGHUP) ──
+# Stalled mid-rebase by a slow merge driver on b's side, then the signal goes to the whole process
+# group, as a closing terminal sends it: git and its driver die with gittw, which still undoes the rebase.
+
+@pytest.mark.parametrize('sig', [signal.SIGHUP, signal.SIGTERM])
+def test_a_sync_stopped_mid_pull_undoes_the_rebase(stations, sig):
+    a, b = stations
+    (a.path / 'notes.txt').write_text('base\n')
+    a.git('add', 'notes.txt')
+    a.git('commit', '-qm', 'notes')
+    a.gittw('sync')
+    b.gittw('sync')
+    (a.path / 'notes.txt').write_text('from a\n')
+    a.gittw('sync')
+    (b.path / 'notes.txt').write_text('from b\n')
+    b.task('add', '--', 'b work')
+    (b.path / '.git' / 'info').mkdir(exist_ok=True)
+    (b.path / '.git' / 'info' / 'attributes').write_text('notes.txt merge=slow\n')
+    b.git('config', 'merge.slow.driver', 'sleep 30; exit 1')
+    p = subprocess.Popen([sys.executable, str(GITTW), 'sync'], env=b.env, start_new_session=True,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    for _ in range(100):
+        if in_rebase(b):
+            break
+        time.sleep(0.1)
+    assert in_rebase(b), 'the pull never got as far as the rebase'
+    time.sleep(0.5)                       # the slow driver is running
+    os.killpg(p.pid, sig)
+    out, err = p.communicate(timeout=20)
+    assert p.returncode != 0
+    assert not in_rebase(b), 'left stopped mid-rebase: ' + err
+    assert 'stopped' in err and 'undone' in err, err
+    assert b.git('symbolic-ref', '--short', 'HEAD').strip() == 'master'
+    assert (b.path / 'notes.txt').read_text() == 'from b\n'
+    assert 'b work' in b.descriptions()
+    b.git('config', '--unset', 'merge.slow.driver')
+    (b.path / '.git' / 'info' / 'attributes').write_text('')
+    assert b.gittw('sync', ok=False).returncode != 0, 'notes.txt still conflicts, but the sync runs again'
 
 
 @pytest.mark.parametrize('b_changed_it', [True, False])
@@ -475,3 +517,31 @@ def test_an_events_without_no_fetch_is_left_alone(stations):
     ev.chmod(0o755)
     r = b.gittw('sync')
     assert not (b.path / 'ran').exists() and 'events' not in r.stderr
+
+
+# ── tw's install manifest (config/.tw_manifest, tracked since tw 2.18.0): each install appends its
+# lines, so two stations installing the same app never stop a sync (s5 and yoga, t 1.4.0, 2026-10-30).
+
+def test_installs_on_both_stations_keep_both_manifest_lines(stations):
+    a, b = stations
+    (a.path / 'config').mkdir(exist_ok=True)
+    (a.path / 'config' / '.tw_manifest').write_text('app|1.0|~/.task/scripts/app||2026-10-01T00:00:00Z\n')
+    (a.path / 'config' / '.tw_manifest.bak').write_text('')
+    a.git('add', 'config')
+    a.git('commit', '-qm', 'manifest')
+    a.gittw('sync')
+    b.gittw('sync')
+    for st, when in ((a, '20:28:00'), (b, '20:35:58')):
+        m = st.path / 'config' / '.tw_manifest'
+        (st.path / 'config' / '.tw_manifest.bak').write_text(m.read_text())
+        m.write_text(m.read_text() + f't|1.4.0|~/.task/scripts/t||2026-10-30T{when}Z\n')
+    a.gittw('sync')
+    b.gittw('sync')
+    a.gittw('sync')
+    for st in (a, b):
+        lines = (st.path / 'config' / '.tw_manifest').read_text().splitlines()
+        assert 't|1.4.0|~/.task/scripts/t||2026-10-30T20:28:00Z' in lines
+        assert 't|1.4.0|~/.task/scripts/t||2026-10-30T20:35:58Z' in lines
+        for name in ('.tw_manifest', '.tw_manifest.bak'):
+            assert '<<<<<<<' not in (st.path / 'config' / name).read_text(), f'{st.name}: {name}'
+        assert not in_rebase(st)
